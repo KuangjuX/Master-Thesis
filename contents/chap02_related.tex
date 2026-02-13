@@ -2,7 +2,8 @@
 
 本文经过详尽的调研，发现当前工业界与学术界的深度学习编译器大致分为三类。
 一类是以 TVM~\cite{tvm/chen2018tvm}，XLA~\cite{xla} 为代表的以 DAG 作为前端表示的深度学习编译器；一类是以 Tiramisu~\cite{cgo/baghdadi2019tiramisu} 为代表的基于多面体模型的深度学习编译器；一类是以 Triton~\cite{pldi/tillet2019triton} 为代表的硬件感知的深度学习编译器。
-下面将对这三类进行详细的介绍。
+此外，近年来还涌现了一批以 Tile 为核心抽象的 GPU 编程 DSL 与编译器框架，如 CuTe~\cite{cute}、ThunderKittens~\cite{arxiv/spector2024thunderkittens}、TileLang~\cite{arxiv/wang2025tilelang} 等。
+下面将对这几类工作进行详细的介绍。
 
 \subsection{基于 DAG 的深度学习编译器}
 
@@ -161,22 +162,94 @@ Welder 提出了图连接和子图调度两个算法：
 然而，基于以上应用在深度学习编译器中的 Tile 技术依然无法表示 FlashAttention，原因在于以上的技术依然局限应用在有向无环图中。
 而 FlashAttention 的算法设计则打破了有向无环图的限制而开启了硬件感知的处理，以有向无环图的信息密度无法将 FlashAttention 等复杂硬件感知算法进行表达。
 
+\subsection{基于 Tile 抽象的 GPU 编程 DSL 与编译器}
+
+随着 FlashAttention 等硬件感知算法的兴起以及 GPU 架构（如 NVIDIA Hopper）的不断演进，近年来涌现了一批以 Tile（分块）为核心抽象的 GPU 编程 DSL 与编译器框架。
+这些工作的共同特征是将 Tile 作为一等公民（first-class citizen），在不同的内存层级（全局内存、共享内存、寄存器）之间显式地管理数据分块与移动，从而在保持较高抽象层次的同时充分发挥硬件性能。
+
+\subsubsection{CuTe 与 CUTLASS 3.x}
+
+CuTe~\cite{cute} 是 NVIDIA 在 CUTLASS 3.x~\cite{CUTLASS} 中引入的一套基于 C++ 模板的布局代数（Layout Algebra）抽象。
+CuTe 的核心思想是将张量的逻辑形状（Shape）与物理布局（Layout）解耦，通过组合代数操作（如 composition、complement、product）来描述数据在不同内存层级之间的映射关系。
+CuTe 引入了 \texttt{Tensor}、\texttt{Layout} 和 \texttt{TiledCopy/TiledMMA} 等核心抽象，使得开发者可以在 Tile 粒度上精确控制数据的加载、存储和计算。
+CuTe 的布局代数为后续许多 Tile 抽象框架提供了重要的理论基础。
+然而，CuTe 本质上是一个 C++ 模板库而非编译器，其编程复杂度依然较高，开发者需要手动管理大量的模板参数和布局变换，同时缺乏自动调优能力。
+
+\subsubsection{ThunderKittens}
+
+ThunderKittens~\cite{arxiv/spector2024thunderkittens} 是斯坦福大学 HazyResearch 团队提出的一个嵌入式 GPU 内核 DSL。
+ThunderKittens 的核心设计理念是以线程束（Warp）作为基本编程单元，在 SRAM（共享内存和寄存器）中的 Tile 上进行操作。
+ThunderKittens 提供了四类核心抽象：寄存器 Tile（Register Tiles）、共享内存 Tile（Shared Tiles）、Tile 间的数据移动操作以及基于 Warp Group 的协作原语。
+通过这些抽象，ThunderKittens 能够以较少的代码量实现高性能的 GPU 内核，例如 FlashAttention-2 仅需约 200 行代码即可实现接近手写 CUDA 的性能。
+ThunderKittens 在 AI 内核的简洁性和性能之间取得了良好的平衡，但目前仅针对 NVIDIA H100（Hopper 架构）进行了优化，缺乏跨架构的可移植性，同时也不支持基于不同分块策略的自动调优。
+
+\subsubsection{TileLang}
+
+TileLang~\cite{arxiv/wang2025tilelang} 是一种以 Tile 为中心的可组合编程模型，采用类 Python 语法，构建在 TVM 编译器基础设施之上。
+TileLang 的核心设计思想是将调度空间与算法逻辑解耦：开发者使用显式的 Tile 级原语控制内存放置、数据移动和并行调度，编译器通过 Tile 推断（Tile Inference）和 Tile 推荐（Tile Recommendation）自动完成共享内存布局优化、流水线调度和代码生成等底层优化。
+TileLang 提供了 \texttt{T.gemm}、\texttt{T.copy}、\texttt{T.reduce} 等 Tile 级原语，支持 Tile 间的灵活组合与融合。
+相比 Triton，TileLang 能够在共享内存和寄存器两个层级上进行编程，提供了更细粒度的硬件控制能力，在 NVIDIA H100 上相比 Triton 可获得显著的性能提升，同时也支持 AMD GPU 等多种后端。
+TileLang 在可编程性与性能之间取得了很好的平衡，融合注意力内核的代码量相比手写实现可减少约 90\%。
+
+\subsubsection{Tilus}
+
+Tilus~\cite{arxiv/ding2025tilus} 是一个面向低精度 GPGPU 计算的 Tile 级编程语言，专注于大语言模型推理场景中 1--8 位任意精度的低精度计算。
+与 Triton 等隐式管理共享内存的框架不同，Tilus 采用线程块级（Thread-block Level）编程模型，允许开发者显式控制共享内存和寄存器的使用。
+Tilus 通过引入 Tile 级的编程原语，将低精度计算的复杂性（如位打包、解包和混合精度累加）封装在语言层面，使得开发者可以在统一的 Tile 抽象上进行编程，而无需关心底层硬件的具体低精度指令实现。
+实验表明，Tilus 在低精度计算场景下相比 Triton 和 Ladder~\cite{osdi/wang2024ladder} 分别取得了显著的性能提升，展示了 Tile 级抽象在特定计算场景下的优势。
+
+\subsubsection{Gluon}
+
+Gluon~\cite{gluon} 是 Triton 生态中的一个内核融合框架，旨在为基于 Tile 的内核提供自动融合能力。
+Gluon 通过分析相邻 Tile 内核之间的数据依赖和内存复用机会，在 Tile 级别进行融合决策，能够考虑共享内存容量、寄存器压力和计算流水线等硬件约束，自动生成融合后的内核代码，从而减少内核启动开销和内存访问次数。
+作为 Triton 生态的一部分，Gluon 与 Triton 的编译流程紧密集成，能够直接利用 Triton 的 MLIR 后端进行代码生成。
+
+\subsubsection{PipeThreader}
+
+PipeThreader~\cite{osdi/cheng2025pipethreader} 是一个支持软件定义流水线的 DNN 编译器，发表于 OSDI 2025。
+PipeThreader 的核心观察是：随着 GPU 中 TensorCore 和 TMA（Tensor Memory Accelerator）等异构专用硬件单元的引入，传统的硬件调度器已难以有效管理复杂的计算流水线。
+PipeThreader 提出了 sTask-graph 抽象，将 DNN 计算分解为细粒度的 sTask（可调度到专用硬件单元的任务），并通过层次化的硬件抽象捕获专用单元的能力。
+PipeThreader 提供了 \texttt{append}、\texttt{wait} 和 \texttt{propagate} 三个调度原语，使得编译器能够通过软件方式实现精细的计算流水线调度。
+实验表明，PipeThreader 能够自动发现类似 FlashAttention 的流水线调度方案，在 NVIDIA H100 和 AMD MI300X 上均取得了与手写实现相当甚至更优的性能；对于 Mamba2 等新兴模型，PipeThreader 发现了新颖的流水线方案，显著优于当前最优的手写实现。
+
+\subsubsection{Tawa}
+
+Tawa~\cite{arxiv/chen2025tawa} 是一个面向现代 GPU 的自动 Warp 特化编译器，其核心创新在于引入了异步引用（Asynchronous Reference, aref）IR 抽象。
+在现代 GPU 架构中，Warp 特化（Warp Specialization）是一种重要的优化技术，通过将不同的 Warp 分配给不同的任务（如数据加载、计算、数据存储）来实现计算与通信的重叠。
+然而，手动编写 Warp 特化代码需要处理复杂的低级通信和同步逻辑。
+Tawa 通过 aref 抽象将异步数据传输建模为一等公民，使得编译器能够自动生成 Warp 特化代码，无需开发者手动管理底层的通信和软件流水线。
+实验表明，Tawa 在 NVIDIA H100 上的 GEMM 任务中相比 cuBLAS 取得了约 1.1 倍的加速，在注意力工作负载上取得了约 1.2 倍的加速。
+
+\subsubsection{小结}
+
+上述工作代表了当前 GPU 编程 DSL 与编译器领域的最新进展，它们共同推动了以 Tile 为核心抽象的编程范式。
+这些工作在各自的设计维度上取得了显著成果：TileLang 在可编程性与性能的平衡上表现突出；Tilus 在低精度计算场景下展示了 Tile 抽象的优势；PipeThreader 在自动化流水线调度方面取得了重要突破；Tawa 在自动 Warp 特化方面提供了创新的解决方案。
+然而，这些工作在设计上各有侧重：TileLang 和 ThunderKittens 主要关注单内核的编程抽象；PipeThreader 专注于流水线调度优化；Tawa 聚焦于 Warp 特化；Gluon 侧重于内核融合。
+目前尚缺乏一个统一的抽象框架能够同时涵盖层次化的内存管理、精确的数据访问模式分析、自动化的流水线调度和跨架构的可移植性。
+本课题提出的 AffineGraph IR 尝试在这一方向上进行探索，通过层次化的数据流图和仿射映射抽象，为上述多个优化维度提供统一的表示基础。
+
 \subsection{存在的问题}
 
-综上所述，尽管现有的深度学习编译器在不同方面取得了显著进展，但仍然存在以下挑战：
+综上所述，尽管现有的深度学习编译器和 GPU 编程框架在不同方面取得了显著进展，但仍然存在以下挑战：
 
 \begin{enumerate}
-    \item \textbf{对于硬件感知算法的表达能力不足。}
+    \item \textbf{传统编译器对硬件感知算法的表达能力不足。}
     以 TVM 为代表的基于 DAG 的编译器提供了粗粒度的、硬件无关的抽象。
     这种抽象虽然通用，但隐藏了硬件细节，导致其难以高效地表达和优化如 FlashAttention 等需要精细控制内存层级和并行执行的硬件感知算法。
     它们无法对寄存器复用、共享内存管理以及线程束级操作等进行有效优化。
     \item \textbf{在特定硬件上的优化不够充分。}
     以 Tiramisu 为代表的基于多面体模型的编译器虽然在循环变换方面表现强大，但缺乏对 GPU 等特定硬件（如线程束、张量核心）的原生抽象，导致代码生成质量不佳。
     同时，其调度语言难以融合具体的硬件信息，对分块策略和自动调优的支持也相对有限。
-    以 Triton 为代表的硬件感知编译器虽然能生成高效的硬件代码，但其设计与特定硬件（如 NVIDIA GPU）高度耦合，限制了可移植性，并且其以内核为中心的设计限制了跨内核的优化机会。
+    以 Triton 为代表的硬件感知编译器虽然能生成高效的硬件代码，但其隐式的共享内存管理限制了开发者对底层硬件的精细控制。
+    \item \textbf{新兴 Tile 抽象框架在各自维度上取得突破，但设计侧重不同。}
+    近年来涌现的以 Tile 为核心抽象的编程框架在编程效率和性能方面取得了显著进步：
+    TileLang 在可编程性与性能的平衡上表现出色，Tilus 在低精度计算场景下展示了优异的性能，PipeThreader 在自动化流水线调度方面取得了重要突破，Tawa 在自动 Warp 特化方面提供了创新方案。
+    然而，这些框架在设计上各有侧重：TileLang 和 ThunderKittens 主要关注单内核的编程抽象与优化；PipeThreader 专注于流水线调度；Tawa 聚焦于 Warp 特化；Gluon 侧重于内核融合。
+    目前尚缺乏一个统一的中间表示能够同时涵盖层次化的内存管理、精确的数据访问模式分析（如仿射变换）、自动化的调度优化和跨架构的可移植性。
     \item \textbf{现有内核融合技术仍受限于表示能力。}
-    当前先进的基于分块（Tile-based）的内核融合技术（如 Welder）虽然被尝试应用在深度学习编译器中，但它们大多构建于原有的 DAG 表示之上。
+    当前先进的基于分块（Tile-based）的内核融合技术（如 Welder、Gluon）虽然被尝试应用在深度学习编译器中，但它们大多构建于原有的 DAG 表示之上或仅关注特定的优化维度。
     DAG 本身的局限性使其无法捕捉 FlashAttention 这类复杂算法所需的嵌套循环结构和精细的内存层级信息，从而无法充分发挥硬件的全部潜力。
+    同时，软件流水线（如 PipeThreader）和 Warp 特化（如 Tawa）等优化通常作为独立的编译 Pass 实现，如何将这些优化与上层 IR 进行更深度的集成仍是一个开放问题。
 \end{enumerate}
 
-这些问题限制了当前深度学习编译器在高性能计算场景下的应用，也是本研究致力于解决的核心问题。
+上述问题为本研究提供了动机。本课题提出的 AffineGraph IR 尝试通过层次化的数据流图和仿射映射抽象，为多个优化维度提供统一的表示基础，但需要指出的是，AffineGraph 并非在所有方面都优于上述新兴框架，而是在 IR 设计层面提供了一种互补的视角，侧重于通过仿射分析实现精确的数据访问模式建模和跨层级的优化协同。
