@@ -1,0 +1,99 @@
+\section{基于多内存层级数据流图的硬件感知抽象}
+
+\subsection{基于数据流的 Affine IR 设计}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/affinegraph-abstraction.pdf}
+    \caption{AffineGraph IR 的核心抽象：(a) \textbf{AffineEdge} 通过基于仿射映射的访问模式连接节点；(b) \textbf{AffineNode} 为缓冲区、任务和嵌套 AffineGraph 提供统一抽象；(c) \textbf{AffineGraph} 将节点和边组合成层次化数据流图。}
+    \label{figure:affinegraph-abstraction}
+\end{figure}
+
+AffineGraph IR 是本课题设计的机遇数据流的 IR，同时也是编译器框架的基石，旨在解决现有 IR 在表达硬件感知算法方面的局限性。
+图~\ref{figure:affinegraph-abstraction} 展示了本课题 IR 设计的关键组件。
+AffineGraph IR 的核心在于引入了一种层次化表示，它将数据流图与显式内存访问模式相结合。
+该 IR 由三种主要节点类型（缓冲区节点、运算符节点和子图节点）组成，这些节点通过仿射边连接，仿射边通过仿射映射编码精确的内存访问模式。
+这种设计能够在保持高级算法抽象的同时，直接对硬件特定特性进行建模。
+与传统的基于 DAG 或多面体的表示（它们抽象掉了硬件细节）不同，AffineGraph IR 为内存层次结构、嵌套并行性和仿射变换提供了显式抽象。
+通过精确建模硬件特定特性（例如 \textit{Bank Conflicts} 和专用计算单元），可以对现代 NVIDIA GPU 进行精细化优化。
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/affine_flash_attention.pdf}
+    \caption{AffineGraph IR 中 FlashAttention-2 的数据流表示。该图展示了嵌套的 SuperGraph 节点捕获了块级和线程束级的层次化分块。缓冲区节点明确标注了内存空间：全局内存（蓝色）用于 HBM 中的 Q、K、V、O；共享内存（绿色）用于 SRAM 中的分块数据；寄存器（黄色）用于计算片段。运算符节点（红色）表示 Tensor Core MMA 操作和在线 Softmax。仿射边通过仿射映射变换编码数据移动。融合计算区域展示了 MMA 和 Softmax 操作在没有中间内存写入的情况下执行，数据依赖在最终 MMA 操作之前的合并点处汇聚。}
+    \label{figure:affinegraph-flashattention}
+\end{figure*}
+
+为了展示 AffineGraph IR 的表达能力和优化能力，本课题以 FlashAttention-2 为例进行说明。
+图~\ref{figure:affinegraph-flashattention} 展示了 AffineGraph IR 如何自然地捕捉 FlashAttention-2 的关键优化，包括 Q、K、V 矩阵的分层平铺、内存层次结构转换和嵌套并行性。
+IR 的结构化表示能够自动优化复杂的内存访问模式和计算依赖关系，而这些通常在现有框架中需要手动处理。
+
+\textbf{缓冲区节点：} 缓冲区节点表示特定硬件内存层次结构级别的连续内存区域。
+每个缓冲区都带有数据类型、形状、内存空间和别名关系等注释。
+与将内存视为不透明张量的基于 DAG 的表示不同，缓冲区节点编码了特定于硬件的内存特性。
+例如，NVIDIA GPU 中的共享内存缓冲区通过 Swizzle Layout 来解决 Bank Conflicts 问题。
+
+\textbf{运算符节点：} 运算符节点描述作用于缓冲区节点的计算操作，表示硬件感知的计算单元（例如,Tensor Core MMA, Warp level reduction）。
+该节点由指令级约束参数化，例如 MMA 的矩阵形状、并行维度（包括线程/线程束/块映射）以及数据重用机会。
+这种粒度使得可以直接映射到硬件原语，同时保持优化灵活性。
+
+\textbf{子图节点：} 子图节点代表嵌套的并行计算单元，这些单元封装了具有仿射边界的循环嵌套、具有明确图块形状和迭代顺序的分块策略，以及定义缓冲区如何在层次结构级别之间移动的内存提升规则。
+一个子图节点递归地包含缓冲区、运算符和子图节点的子图，从而实现层次优化。
+例如，一个 GEMM 子图节点可能包含用于将图块从全局内存加载到共享内存、将图块从共享内存加载到寄存器以及后续寄存器级 MMA 操作的子块。
+
+\textbf{仿射边：} 仿射边连接不同的节点，并编码内存缓冲区之间的数据依赖关系，如图 3(a) 所示。
+它承载仿射映射，用于描述数据如何在内存层级之间传输。
+仿射边的源缓冲区节点和目标缓冲区节点都标注了其层级，从而可以将仿射边映射到不同的硬件操作。
+例如，共享内存和寄存器内存之间的数据移动——无论是加载还是存储——由于不同的同步要求和指令流水线，必须映射到不同的硬件操作。
+缓冲区、运算符和子图节点被封装成一个统一的抽象概念，如图 3(c) 所示。
+
+\textbf{仿射映射：} 仿射映射是形式化定义内存访问模式的数的核心，它描述了从 \(m\) 维逻辑迭代空间到 \(n\) 为数据坐标空间的映射。
+形式上，仿射映射 \(M\) 是一个函数 \(\mathcal{M}: \mathbb{Z}^m \to \mathbb{Z}^n\)，由迭代域 \(\mathcal{D} \subseteq \mathbb{Z}^m\) 定义，该映射表示为：
+
+\[ \mathcal{M}(\vec{i}) = \mathbf{A}\vec{i} + \vec{n}, \quad \forall \vec{i} \in \mathcal{D}\]
+
+其中：
+
+\begin{itemize}
+    \item \(\vec{i}\) 是一个 \(m\) 维度整数向量用于表示迭代向量。
+    \item \(\mathbf{A} \in \mathbb{Z}^{n \times m}\) 是一个整数矩阵，用来表示变换的线性部分。
+    \item \(\vec{b} \in \mathbb{Z}^n\) 是一个整数向量，表达常数偏移。
+    \item \(\mathcal{D}\) 是一个迭代域， 通常是一个 Z-Polyhedron，由一组仿射不等式定义 \(\mathbf{D}\vec{i} + \vec{d} \ge \vec{0}\)。
+\end{itemize}
+
+这种结构能够精确且可分析地表达复杂的访问模式，例如分块，步长和交错访问。
+
+为了将这种形式化方法应用于实际示例，考虑一个典型的 GEMM 操作 \(C_{ij} = \sum_k A_{ik}b_{kj}\)，其内存布局为行优先。
+迭代域为 \(\mathcal{D} = \{ (i, j, k)^T \mid 0 \le i < M, 0 \le j < N, 0 \le k < K\}\)。
+
+对形状为 \(A[i, k]\) 的二维矩阵 \(A\) 形状为 \(M \times K\) 可以描述为从迭代空间 \(\mathbb{Z}^2\) (迭代向量 \(\vec{i}_A = (i, k)^T\)) 到一维内存地址的映射 \(\mathbb{Z}^1\)。
+对于行优先布局，地址计算为 \(\text{offset} = i \cdot K + k\).
+这种线性地址计算可以完美使用本课题的仿射定义来描述：
+\[ \text{addr}(\vec{i}_A) = \begin{bmatrix} K & 1 \end{bmatrix} \begin{bmatrix} i \\ k \end{bmatrix} + [\text{base\_addr}_A] \]， 这里，仿射映射由 \(\mathbf{A} = \begin{bmatrix} K & 1
+\end{bmatrix}\) 和 \(\vec{b} = [\text{base\_addr}_A]\) 定义。
+这个例子展示了形式化的矩阵向量表示法如何简洁地建模具体的底层内存访问模式，从而使编译器能够分析和转换这些模式。
+
+\subsection{控制流与谓词执行}
+
+静态数据流图面临的一个关键挑战是处理动态控制流（例如在 Masked Attention 中的情况）。
+AffineGraph 通过谓词执行（Predication）来解决这个问题，即操作根据运行时的掩码（mask）来条件性地执行。
+本课题通过为节点和边增加一个可选的谓词（Predicate）来实现这一点，而不是引入会破坏数据流结构的显式控制流节点。
+
+本课题将\textbf{谓词（Predicate）}形式化地定义为一个元组 \(P = (B_{\text{pred}}, \mathcal{A}_{\text{pred}})\)，其中：
+\begin{itemize}
+    \item \(B_{\text{pred}}\) 是一个指向\textbf{缓冲区节点}的引用，该节点包含布尔值（或整数 0/1），代表条件掩码。
+    \item \(\mathcal{A}_{\text{pred}}\) 是一个\textbf{仿射映射}，它将来自迭代域 \(\mathcal{D}\) 的当前迭代变量 \(\vec{i}\) 映射到 \(B_{\text{pred}}\) 内的一个地址。
+\end{itemize}
+
+这个谓词 \(P\) 可以附加到数据移动的边和计算节点上：
+
+\textbf{带谓词的仿射边：} 一个定义了从源缓冲区 \(B_{\text{src}}\) 到目标缓冲区 \(B_{\text{dest}}\) 数据传输的\textbf{仿射边}，可以由谓词 \(P\) 限定。对于给定的迭代 \(\vec{i} \in \mathcal{D}\)，仅当条件 \(B_{\text{pred}}[\mathcal{A}_{\text{pred}}(\vec{i})] = \text{true}\) 满足时，数据传输才会被执行。
+
+\textbf{带谓词的算子节点：} 类似地，一个\textbf{算子节点}也可以由谓词 \(P\) 限定。对于迭代 \(\vec{i} \in \mathcal{D}\)，仅当 \(B_{\text{pred}}[\mathcal{A}_{\text{pred}}(\vec{i})] = \text{true}\) 时，该算子定义的计算才会被执行。
+
+例如，在 Masked Self-Attention 机制中，Query 和 Key 矩阵的乘法可以被实现为一个带谓词的\textbf{算子节点}。
+在这里，\(B_{\text{pred}}\) 就是注意力掩码张量（例如，一个上三角布尔矩阵）。
+对于输出的注意力得分矩阵的每个元素 \((i, j)\)，映射 \(\mathcal{A}_{\text{pred}}\) 会访问掩码中对应的 \((i, j)\) 元素。
+代码生成器随后会生成相应的代码，只有当获取的掩码值为真时，才执行乘加操作。
+
+这种设计使得 AffineGraph 能够在保持其静态、可分析的数据流结构的同时，优雅地融入动态的、依赖数据的控制流，使其足以表达复杂的现代算法。

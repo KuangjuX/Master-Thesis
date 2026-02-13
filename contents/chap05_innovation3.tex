@@ -1,0 +1,351 @@
+\section{高效的内核映射策略}
+
+\subsection{图降低与代码生成}
+
+图降低（Graph Lowering）阶段将优化后的 AffineGraph IR 转换为可执行代码。
+该过程通过对图的节点进行拓扑排序，并对排序后的每个节点递归调用代码生成函数，从而系统地将声明式的图表示转换为命令式的嵌套循环和硬件特定指令序列。
+
+\begin{algorithm}[H]
+\caption{AffineGraph 代码生成算法}
+\label{alg:codegen}
+\begin{algorithmic}[1]
+\Procedure{Gen}{N}
+    \If{\(N\) is predicated by \(P=(B_{\text{pred}}, \mathcal{A}_{\text{pred}})\)}
+        \State Emit("if (\(B_{\text{pred}}[\mathcal{A}_{\text{pred}}(\vec{i})]\)) \{")
+    \EndIf
+
+    \If{\(N\) is a \textbf{SubGraph} with domain \(\mathcal{D}_N\)}
+        \State Emit("for \(\vec{i} \in \mathcal{D}_N\) \{")
+        \ForAll{child \(C\) in TopologicalSort(\(N\).children)}
+            \Call{Gen}{$C$}
+        \EndFor
+        \State Emit("\}")
+    \ElsIf{\(N\) is an \textbf{Operator}}
+        \ForAll{edge \(E\) in \(N\).incoming\_edges}
+            \State Emit(InstructionForLoad(\(E\)))
+        \EndFor
+        \State Emit(InstructionForSync(\(N\)))
+        \State Emit(InstructionForCompute(\(N\)))
+    \EndIf
+
+    \If{\(N\) is predicated}
+        \State Emit("\}")
+    \EndIf
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+代码生成的核心是一个递归过程 \textsc{Gen}，如算法~\ref{alg:codegen}所示。
+它根据节点类型（\(N\)）来生成相应的代码。
+当遇到一个子图节点（SubGraph）时，它会生成循环头，然后递归调用自身来生成循环体。
+关键逻辑在于处理算子节点（Operator）。
+算法首先为其所有传入的数据依赖（边）生成相应的数据加载指令（例如，针对不同内存层级的 \textit{cp.async} 或 \textit{ld.matrix} 指令）。
+在所有加载指令发出后，它会生成一个同步指令（如 \textit{barrier}）来等待异步操作完成，最后才生成算子的计算指令。
+这种形式化的递归定义，使得从层级化的图表示到结构化的高性能代码的转换过程清晰而系统。
+
+\subsection{案例研究：以 GEMM 为例}
+
+为了更具体地说明 AffineGraph 的工作流程，本节以矩阵乘法（GEMM）为例，展示如何将一个复杂的计算内核通过 AffineGraph 的层级化表示、变换和代码生成流程，最终映射为高性能的 CUDA 代码。
+
+
+\begin{figure*}[h]
+  \centering
+  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/gemm_case.pdf}
+  \caption{使用 AffineGraph 的 GEMM 案例研究。
+  (a) 高层 AffineGraph IR 表示，展示了缓冲区声明和数据移动的仿射映射。
+  (b) 降低后的数据流图，显式地表达了所有依赖关系。
+  (c) 矩阵 A 的分块与到 GPU 执行层级的映射细节，从全局内存、经由共享内存、最终到寄存器。
+  }
+  \label{figure:gemm_case}
+\end{figure*}
+
+\paragraph{层级化 IR 构建与数据流表示}
+如图~\ref{figure:gemm_case}(a) 所示，GEMM 的 AffineGraph IR 描述首先在不同的内存空间（全局内存 gA、共享内存 sA、寄存器 acc）中声明缓冲区。
+接着，通过一系列仿射映射（AffineMap）来精确定义数据分块和移动的逻辑。
+例如，\textit{Map\_G2S\_A} 定义了如何将一个 128x32 的数据块从全局内存移动到共享内存。
+这些仿射映射被组织在嵌套的块（Block）和图（Graph）中，直接反映了分块 GEMM 算法的嵌套循环结构。
+
+
+随后，这个高层 IR 被降低为一个显式表达所有依赖关系的数据流图，如图~\ref{figure:gemm_case}(b) 所示。
+在这个图中，代表数据传输的边（例如从 gA 到 sA）会被相应的仿射映射所标注，使得精确的分块和访问模式成为图的一部分，为后续的自动化分析和变换提供了基础。
+
+图~\ref{figure:gemm_case}(c) 则更详细地展示了矩阵 A 的数据如何被分块并映射到 GPU 的执行和内存层级。
+全局矩阵首先被划分为线程块（CTA）级别的大块，并通过 slice-k 方法分步加载到共享内存。
+在 CTA 内部，线程束（Warp）协作从共享内存中加载更小的微块到寄存器，以执行 MMA 指令。
+AffineGraph 为这整个分块和线程映射的层级结构提供了统一的数学表示。
+
+代码~\ref{lst:gemm_dsl_example} 展示了使用 AffineGraph IR 定义 GEMM 算子的代码示例。
+在代码中，首先定义了全局内存、共享内存和寄存器内存的缓冲区（Buffer），接着定义了计算算子（Operator）。
+通过构建分层的子图（SubGraph）结构，将算子与特定循环层级关联，并使用仿射映射（AffineMap）显式地描述了数据在不同内存层级间的流动与依赖关系。最终调用 \texttt{codegen()} 接口即可生成对应的硬件代码。
+
+\begin{figure}[h]
+\begin{lstlisting}[language=AffineDSL, caption={使用 AffineGraph IR 实现的 GEMM 示例}, label={lst:gemm_dsl_example}]
+# Define Buffer node
+gA  = Buffer("gA",  [256, 256], space="global")
+sA  = Buffer("sA",  [64, 64],   space="shared")
+rA  = Buffer("rA",  [16, 16],   space="register")
+acc = Buffer("acc", [16, 16],   space="register")
+
+# Define Operator node
+reg_mma = Operator("mma.sync", inputs=[rA, ...], output=acc)
+
+# Building a hierarchical SubGraph structure
+s2r_subgraph = SubGraph(
+    loop="k_inner",
+    nodes=[reg_mma],
+    affine_map=AffineMap(sA, rA, loop="k_inner")
+)
+
+top_level_graph = SubGraph(
+    loop="k_outer",
+   nodes=[s2r_subgraph],
+   affine_maps=[
+        AffineMap(gA, sA, loop="k_outer"), # Load: gA -> sA
+        AffineMap(gB, sB, ...),         # (Load gB -> sB)
+        AffineMap(acc, gC, ...)         # (Store final result)
+    ]
+)
+final_code = top_level_graph.codegen()
+\end{lstlisting}
+\end{figure}
+
+\begin{figure*}[h]
+  \centering
+  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/layout_transformation.pdf}
+  \caption{AffineGraph 中的布局推断与变换流水线。
+  (a) 从全局到共享内存的数据加载，根据 WarpLayout 自动进行向量化和合并内存访问。
+  (b) 共享内存布局推断，展示了如何根据 SharedTile 和 WarpLayout 推导 WarpTile 配置，并采用自适应的 Swizzling 策略来平衡 Bank Conflicts 和 CTA 占用率。
+  (c) 寄存器级的 BaseTile 抽象，其中单个线程处理8个元素，32个线程协作处理 16x16 的 ld.matrix 块以实现高效的 mma.sync 操作。
+  }
+  \label{figure:layout_inference}
+\end{figure*}
+
+\paragraph{布局推断与变换}
+在层级化 IR 构建之后，编译器会执行一个复杂的\textbf{布局推断}过程，将逻辑表示转换为具体的、经过硬件优化的执行计划，如图~\ref{figure:layout_inference} 所示。
+这个过程分为三个关键阶段：
+\begin{enumerate}
+    \item \textbf{从全局到共享内存的加载与自动向量化：} 编译器根据给定的 WarpLayout 配置，自动推断出线程束应如何迭代访问 GlobalTile 以最高效地加载数据，并自动应用向量化和合并访问优化，以最大化内存带宽利用率。
+    \item \textbf{共享内存布局推断与自适应 Swizzling：} 编译器根据 SharedTile 和 WarpLayout 的信息，自动推导最优的 WarpTile 配置。一个关键创新是自适应的 Swizzling 策略，它会根据 WarpTile 的维度自动选择合适的 Swizzling 模式（例如 32字节、64字节或128字节），在内存访问效率和 CTA 占用率之间进行权衡。
+    \item \textbf{寄存器级 BaseTile 抽象与张量核心集成：} 在最后阶段，数据被组织以用于寄存器级的计算。AffineGraph 引入了 BaseTile 抽象，定义了单个线程处理的最小单元。32个线程协作形成一个 WarpTile，其大小恰好匹配 16x16 的 \textit{ld.matrix} 操作，从而高效地将矩阵片段加载到为张量核心（Tensor Core）优化的寄存器中，为后续的 \textit{mma.sync} 计算做好准备。
+\end{enumerate}
+
+\paragraph{从数据流图生成 CUDA 代码}
+最后，AffineGraph 将优化后的数据流图转换为高性能的 CUDA 代码。
+这一过程由一个基于 C++ 模板库的后端实现。
+代码生成器遍历数据流图，并根据在优化阶段确定的分块形状、布局和数据类型来实例化相应的模板组件（如 \textit{GlobalToSharedLoader}, \textit{SharedToRegLoader}）。
+最终生成的内核代码结构清晰，通过一个 \textit{traits} 结构体来集中管理所有编译时配置，其主循环体则精确地协调了数据在不同内存层级间的流水线移动和计算。
+
+\begin{figure}
+\begin{lstlisting}[language=cplus, caption={基于模版库生成的 CUDA kernel}, label={lst:gemm_codegen}]
+// 1. Traits struct centralizes kernel configuration.
+struct KeGemmTraits {
+  // ... tile dimensions, data layouts, and types for A, B, C ...
+  using G2SLoaderA = GlobalToSharedLoader<...>;
+  using S2RLoaderA = SharedToRegLoader<...>;
+};
+// 2. Kernel implementation uses types from Traits.
+template <typename Traits>
+__global__ void gemm(const InType* dA, const InType* dB, AccType* dC) {
+  // ... setup memory pointers and tile offsets ...
+  typename Traits::G2SLoaderA g2s_a;
+  typename Traits::S2RLoaderA s2r_a;
+  typename Traits::RegC acc; // Accumulators in registers
+  // 3. Main loop for pipelined data movement and computation.
+  for (int k = ...) {
+    // Load tiles from global to shared memory
+    g2s_a(gAs(k), sA);
+    g2s_b(gBs(k), sB);
+    __copy_async();
+    __syncthreads(); // Wait for loads
+    // Inner loop for computation
+    for (int k_inner = ...) {
+      s2r_a(sAs(k_inner), rA); // Load from shared to registers
+      s2r_b(sBs(k_inner), rB);
+      compute::gemm(rA, rB, acc);
+    }
+  }
+  // 4. Store results back to global memory.
+  r2s_c(acc, sC);
+  __syncthreads();
+  s2g_c(sC, gC);
+}
+\end{lstlisting}
+\end{figure}
+
+\subsection{系统实现}
+
+AffineGraph 的实现采用了多语言混合编程的策略，以兼顾开发效率与运行性能。
+其中，用户编程接口和解析器部分由 Python 实现，提供了友好的 API。
+图表示的核心组件，包括图的构建、分析与优化变换，则由 Rust 实现，利用其高性能和内存安全的特性来处理复杂的图算法。
+最终的硬件代码生成部分由 C++ 实现，针对 NVIDIA GPU 生成了高度优化的 CUDA 代码，能够高效利用 Tensor Core 等硬件单元。
+
+\subsection{实验评估}
+
+\paragraph{实验环境设置} 本课题的实验是在配备 80GB HBM2 显存的 NVIDIA A100 GPU 上进行的，该 GPU 拥有 108 个流多处理器（SM），其峰值 FP16 Tensor Core 性能达到 312 TFLOPS。
+
+\paragraph{深度学习负载} 本课题的评估侧重于构成大语言模型基础的基本深度学习操作。
+本课题首先从表现出各种访问模式的原始内存操作（Load/Store）开始，这对于理解本课题编译器的基本内存访问能力至关重要。
+对于矩阵操作，本课题评估了具有不同维度（M, N, K）的标准矩阵乘法（GEMM），以评估编译器优化计算密集型操作的能力。
+为了展示算子融合的有效性，本课题测试了融合的两个 GEMM 操作，其中两个连续的矩阵乘法被组合成一个单一操作。
+本课题还评估了 Batched GEMM 操作，这对于经常同时处理多个输入的深度学习负载至关重要。
+最后，本课题评估了编译器在 FlashAttention~\cite{dao2022flashattention}（一种内存高效的注意力机制）上的性能，涵盖了不同的序列长度和隐藏层大小。
+选择这些负载是为了全面评估本课题的编译器在处理内存受限（Memory-bound）和计算受限（Compute-bound）操作方面的能力，以及其在优化复杂算法模式方面的有效性。
+
+\paragraph{基准对比} 本课题将 AffineGraph 与最先进的 DNN 框架和库进行了比较。
+对于标准矩阵乘法（GEMM），本课题与 NVIDIA 针对 CUDA 优化的 BLAS 库 cuBLAS、提供线性代数子程序 CUDA 模板的 CUTLASS~\cite{CUTLASS} 以及用于编写高效 GPU 代码的开源语言和编译器 Triton~\cite{pldi/tillet2019triton} 进行了评估。
+对于融合 GEMM 操作，本课题将 CUTLASS、PyTorch~\cite{nips/paszke2019pytorch} 和 Triton~\cite{pldi/tillet2019triton} 作为基准。
+对于注意力操作，本课题与 FlashAttention 算法的手动优化实现 FlashAttention-2~\cite{dao2023flashattention}、PyTorch 和 Triton 进行了比较。
+所有评估均以预热迭代开始，随后重复执行每个负载至少 5 秒，以确保结果准确稳定。
+平均性能指标（如加速比）是使用所有实验的几何平均值计算得出的。
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/evaluations/layout_comparison.pdf}
+    \caption{不同形状和不同 Warp Layout 下的内存操作（Load/Store）性能对比。柱状图上方的数字表示加速比（CUTLASS/AffineGraph）。AffineGraph 在较大矩阵上取得了最高 1.50 倍的加速。}
+    \label{figure:layout_comparison}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/evaluations/affine_evaluation.pdf}
+    \caption{AffineGraph 与基准框架的性能对比。
+    (a) 不同矩阵规模下的标准 GEMM；
+    (b) 不同批量大小下的 Batched GEMM；
+    (c) 融合双 GEMM 操作；
+    (d) 隐藏维度为 128 的 FlashAttention；
+    (e) 隐藏维度为 256 的 FlashAttention；
+    (f) 隐藏维度为 64 的 Block Sparse Attention；
+    (g) 隐藏维度为 128 的 Block Sparse Attention。
+    纵轴为执行时间（ms），越低越好。}
+    \label{figure:affine_evaluation}
+\end{figure}
+
+\subsubsection{NVIDIA A100 上的算子性能}
+
+图~\ref{figure:affine_evaluation} 展示了所有算子配置的性能结果。横轴表示不同的算子配置，纵轴表示以毫秒为单位的执行时间。
+
+\paragraph{内存操作}
+本课题首先在原始的 Load/Store 操作上评估 AffineGraph，以评估其基本的内存访问优化能力。
+如图~\ref{figure:layout_comparison} 所示，在从 $16 \times 64$ 到 $128 \times 256$ 的矩阵形状上进行了性能测试。
+AffineGraph 在小矩阵（$16 \times 64$ 和 $64 \times 64$）上的性能与 CUTLASS 相差不超过 1.3\%。
+随着矩阵尺寸的增大，性能优势愈发明显：在 $128 \times 128$ 时取得了 11.2\% 的加速，在 $128 \times 256$ 时更是达到了 33.3\% 的加速。
+这一提升源于 AffineGraph 利用基于仿射的分析来建模复杂的内存访问模式，并生成高效的内存层级遍历代码的能力。
+性能提升在较大矩阵上尤为显著，因为此时内存访问模式更加复杂，优化空间也更为充裕。
+
+\paragraph{GEMM}
+如图~\ref{figure:affine_evaluation}(a) 所示，标准 GEMM 操作在从 $1024^3$ 到 $8192^3$ 的矩阵规模上进行了性能测试。
+尽管现有编译器和库已经提供了高度优化的 GEMM 内核，AffineGraph 仍然取得了具有竞争力的性能。
+与 CUTLASS 相比，AffineGraph 平均达到了 0.92 倍的性能（最高 1.08 倍）。
+与 Triton 相比，AffineGraph 保持了一致的优势，平均加速比为 1.14 倍（最高 1.36 倍）。
+虽然 AffineGraph 并未在所有配置上超越经过多年手动优化和架构特定调优的 cuBLAS 等厂商库，但取得接近手写优化实现的性能表明，本课题的编译器生成代码已经能够逼近手动优化的水平。
+值得注意的是，AffineGraph 在不使用手动调优或流水线优化的情况下实现了这一性能，完全依赖于 AffineGraph IR 通过仿射分析建模内存层级转换和计算模式的能力。
+
+对于批量矩阵乘法（Batch GEMM）操作（图~\ref{figure:affine_evaluation}(b)），本课题评估了批量大小从 2 到 16 的配置。
+AffineGraph 在不同批量大小下展现了稳定的性能，执行时间在 CUTLASS 的 0.87--0.97 倍范围内。
+随着批量大小增加，性能保持稳定，这突显了本课题框架通过有效的内存访问建模来高效处理批量操作的能力。
+
+\paragraph{融合双 GEMM}
+与标准 GEMM 操作相比，融合双 GEMM 涉及更复杂的计算阶段和数据依赖关系，为 AffineGraph 开辟了更大的优化空间。
+如图~\ref{figure:affine_evaluation}(c) 所示，融合双 GEMM 操作在从 $1024 \times 1024$ 到 $8192 \times 8192$ 的矩阵规模上进行了测试（K 和 P 维度固定为 128）。
+AffineGraph 在所有矩阵规模上都展现了显著的性能优势。
+与 CUTLASS、Triton 和 cuBLAS 相比，AffineGraph 分别取得了平均 2.52 倍（最高 3.02 倍）、2.18 倍（最高 3.26 倍）和 1.94 倍（最高 2.41 倍）的加速。
+这与标准 GEMM 中 AffineGraph 仅具有竞争力但并非始终更快的情况形成了鲜明对比。
+
+这一提升源于 AffineGraph 利用基于仿射的分析自动识别跨融合操作的数据重用机会的能力。
+对于 $D = (A \times B) \times C$ 的计算模式，当维度允许时，本课题的编译器将中间结果 $A \times B$ 保留在共享内存中，从而消除了一次到全局内存的往返传输。
+基准方案要么执行独立的内核（cuBLAS、PyTorch），产生全局内存的写入/读取开销，要么需要手动指定融合方式（Triton、CUTLASS）。
+AffineGraph 的仿射分析能够自动判断何时融合是有益的，并生成优化的融合内核。
+当中间维度（K、P）较小（本实验中为 128）时，中间结果可以完全放入共享内存，此时效果尤为显著。
+持续的 2--3 倍加速验证了 AffineGraph 的一个核心能力：高层次的仿射建模能够实现自动的跨算子优化，而这种优化通过手动编程或传统编译器方法很难实现。
+
+\paragraph{FlashAttention}
+与 GEMM 和融合 GEMM 操作相比，FlashAttention 涉及更深层次的计算阶段和更复杂的内存访问模式，为 AffineGraph 提供了更大的优化空间。
+如图~\ref{figure:affine_evaluation}(d-e) 所示，FlashAttention 算子在隐藏维度为 128 和 256 的配置下进行了评测。
+评估覆盖了从 128 到 4096 的序列长度，批量大小为 32，注意力头数为 8。
+
+AffineGraph 在较短序列长度下展现了尤为突出的性能。
+对于隐藏维度 128（图~\ref{figure:affine_evaluation}(d)），AffineGraph 相比 FlashAttention-2 分别取得了 3.72 倍（seqlen=128）、1.69 倍（seqlen=256）和 1.05 倍（seqlen=512）的平均加速。
+随着序列长度的增加，AffineGraph 保持了具有竞争力的性能，在较长序列下执行时间与 FlashAttention-2 接近。
+与 Triton 相比，AffineGraph 取得了平均 1.24 倍（最高 3.72 倍）的加速。
+对于隐藏维度 256（图~\ref{figure:affine_evaluation}(e)），AffineGraph 展现了类似的趋势，相比 FlashAttention-2 分别取得了 1.61 倍（seqlen=128）、1.16 倍（seqlen=256）和 1.08 倍（seqlen=512）的平均加速，并且相比 Triton 保持了最高 3.06 倍的一致优势。
+
+与序列长度相关的性能表现揭示了 AffineGraph 优化策略的特点。
+在较短序列下，编译器在分块大小选择上具有更大的灵活性，能够更好地利用共享内存中的数据重用。
+随着序列长度的增加，工作集增大，缓存效率降低，FlashAttention-2 手动调优的分块策略变得更为有效，差距逐渐缩小。
+这种通用的调度能力使 AffineGraph 能够达到与手动优化实现相当的性能，在某些配置下甚至超越它们。
+这突显了 AffineGraph 通过仿射分析定义的优化空间自动发现有效优化方案的能力。
+
+\paragraph{Block Sparse Attention}
+如图~\ref{figure:affine_evaluation}(f-g) 所示，Block Sparse Attention 操作在隐藏维度为 64 和 128 的配置下进行了评测，序列长度范围为 128 到 1024。
+Block Sparse Attention 引入了不规则的内存访问模式和条件计算，为编译器优化提供了具有挑战性的测试。
+
+对于隐藏维度 64（图~\ref{figure:affine_evaluation}(f)），AffineGraph 与 Triton 取得了具有竞争力的性能，在不同序列长度下性能比为 0.82 倍到 1.00 倍。
+与 FlashAttention-2 相比，AffineGraph 展现了显著的优势，平均加速比为 2.5--9.4 倍。
+与 FlashAttention-2 之间的巨大差距反映了 FlashAttention-2 针对密集注意力进行了优化，在适配稀疏模式时会产生额外开销。
+与 PyTorch 相比，AffineGraph 保持了 15.6--19.0 倍的显著加速。
+
+对于隐藏维度 128（图~\ref{figure:affine_evaluation}(g)），AffineGraph 继续展现了强劲的性能。
+与 Triton 相比，AffineGraph 取得了 0.91 倍到 1.07 倍的加速。
+与 FlashAttention-2 和 PyTorch 相比，AffineGraph 分别取得了平均 1.7--6.2 倍和 11.9--14.2 倍的加速。
+
+这些结果突显了 AffineGraph 在处理新兴稀疏注意力模式方面的适应性。
+稀疏块结构引入了条件计算和非连续内存访问，这对传统编译器构成了挑战。
+AffineGraph 基于仿射的分析成功捕捉了这些不规则模式并生成了高效代码，展示了本课题方法在规则密集计算之外的通用性。
+这一能力对于大规模模型尤为重要，因为稀疏注意力模式正越来越多地被用于在保持模型质量的同时降低计算成本。
+
+\subsubsection{小结}
+
+综合以上实验结果，AffineGraph 在多种典型深度学习算子上都取得了具有竞争力的性能。
+在标准 GEMM 和 Batch GEMM 上，AffineGraph 的性能与 CUTLASS 相当并显著优于 Triton；
+在融合 GEMM 操作上展示了 2--3 倍的显著加速优势；
+在 FlashAttention 上，尤其在短序列场景下取得了最高 3.72 倍的性能提升；
+在 Block Sparse Attention 上，展现了处理不规则计算模式的通用能力。
+这些结果验证了 AffineGraph 作为一个新型编译器框架在生成高性能硬件代码方面的有效性，尤其是在处理复杂的、需要硬件感知的算法时，其优势更为明显。
+
+\subsubsection{面向 Hopper 架构的可移植性评估}\label{sec:hopper-eval}
+
+为了评估 AffineGraph 设计在 Ampere 架构之外的通用性，本课题在 NVIDIA H800 GPU（Hopper 架构）上进行了额外的实验。
+H800 配备 80GB HBM3 显存，峰值内存带宽为 3.35 TB/s。
+本课题聚焦于内存受限（Memory-bound）操作——Softmax 和 RMSNorm，这类操作对内存子系统压力较大，能够充分受益于 Hopper 架构的增强特性。
+
+\paragraph{实验设置}
+本课题按照 AffineGraph 的层级化分块方法论（第~\ref{sec:hopper-extension}~节），实现了 Softmax 和 RMSNorm 内核，利用了 Hopper 特有的功能，包括线程块集群（Thread Block Clusters）用于协作数据加载，以及 Warpgroup 级别的归约操作。
+基准对比方案包括 \texttt{torch.compile}（PyTorch 2.x 的编译器）和 Liger Kernel（一个基于 Triton 的、针对 LLM 训练优化的内核库）。
+所有输入使用 FP16 精度。
+输入形状范围为 $[M, N] = [32768, 1024]$ 到 $[4096, 131072]$，覆盖了从高窄矩阵到矮宽矩阵的广泛内存访问模式。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/evaluations/hopper_membound_evaluation.pdf}
+    \caption{NVIDIA H800（Hopper）上内存受限操作的性能。
+    (a) Softmax 延迟。(b) Softmax 有效带宽。
+    (c) RMSNorm 延迟。(d) RMSNorm 有效带宽。
+    AffineGraph 在所有配置下均维持约 2900 GB/s 的有效带宽，接近 H800 的 3350 GB/s 峰值 HBM3 带宽。N/A 表示该框架不支持给定的配置。}
+    \label{figure:hopper_evaluation}
+\end{figure}
+
+\paragraph{实验结果}
+图~\ref{figure:hopper_evaluation} 展示了实验结果。
+
+对于 Softmax（图~\ref{figure:hopper_evaluation}(a-b)），AffineGraph 在所有配置下相比 \texttt{torch.compile} 取得了 1.2--2.2 倍的加速。
+与 Liger Kernel 相比，AffineGraph 在中等规模（$N \leq 32$K）下保持了相当的性能，在 $N = 64$K 时取得了 1.6 倍的加速，并且能够扩展到 $N = 128$K，而 Liger Kernel 由于 Triton 的分块大小限制在此规模下无法运行。
+AffineGraph 在所有形状下维持了 2765--2996 GB/s 的有效内存带宽，达到了 H800 峰值 HBM3 带宽的 89\%。
+
+对于 RMSNorm（图~\ref{figure:hopper_evaluation}(c-d)），AffineGraph 相比 \texttt{torch.compile} 取得了 1.2--1.7 倍的加速。
+与 Liger Kernel 相比，AffineGraph 在中小规模下展现了相当的性能，但在 $N = 64$K 时取得了 3.2 倍的加速（此时 Liger Kernel 的 Triton 后端效率显著下降），并且能够扩展到 Liger Kernel 不支持的 $N = 128$K。
+AffineGraph 全程维持了 2743--2969 GB/s 的有效带宽。
+
+\paragraph{分析}
+从 Hopper 实验结果中可以得出两个关键观察：
+
+\textbf{（1）持续接近峰值的带宽利用率。}
+AffineGraph 在 Softmax 和 RMSNorm 的所有配置下均维持了约 2900 GB/s（约 87\%）的 H800 峰值带宽。
+这证实了 AffineGraph 的层级化分块方法论——将数据在全局内存$\rightarrow$共享内存$\rightarrow$寄存器之间进行分区，并采用集群级别的协作加载——能够有效利用 Hopper 增强的内存子系统。
+
+\textbf{（2）对大分块尺寸的可扩展性。}
+AffineGraph 设计的一个关键优势在于其支持大的每行维度（$N$ 最高达 131K），这得益于集群级别的协作和多阶段分块。
+\texttt{torch.compile} 和 Liger Kernel（基于 Triton）在 $N \geq 64$K 时要么性能显著下降，要么完全失败，因为 Triton 的分块大小受限于其编译器的最大分块维度。
+AffineGraph 显式的内存层级建模使得灵活的分块策略成为可能，能够将大维度在集群内的多个加载阶段中进行分区，从而避免了这一限制。
+
+这些结果验证了 AffineGraph 的核心抽象——层级化内存建模和基于仿射的访问模式分析——在不同 GPU 代际之间具有可移植性。
+Hopper 原型仅需要指令级别的适配（TMA 替代 \texttt{cp.async}，Warpgroup 替代 Warp 级别的 MMA），同时保持了相同的高层设计，证实了第~\ref{sec:hopper-extension}~节中讨论的架构可扩展性。

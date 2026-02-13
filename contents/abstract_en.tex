@@ -1,0 +1,9 @@
+\section*{Abstract}
+
+With the continuous development of deep learning models, especially the rise of Large Language Models (LLMs), model structures are becoming increasingly complex, placing higher demands on hardware performance. Existing deep learning compilers often struggle to fully exploit hardware potential when dealing with hardware-aware algorithms (such as FlashAttention). DAG-based intermediate representations cannot effectively describe nested loops and complex memory hierarchy interactions, while polyhedral-based compilers have limitations in hardware-specific optimizations.
+
+To address these issues, this thesis proposes a novel compiler framework named AffineGraph. This framework introduces a hardware-aware abstraction based on multi-level memory dataflow graphs, which precisely models memory hierarchy transitions and computation patterns through affine transformations. Based on this, the thesis proposes a kernel fusion technique based on tiling strategies, exploring optimal tiling and fusion strategies through automated graph transformations and an analytical cost model, while demonstrating the extensibility of the design to newer architectures such as NVIDIA Hopper. Finally, the thesis designs an efficient kernel mapping strategy based on AtomicTile and Micro-Task hierarchical execution model to map the optimized dataflow graph to high-performance CUDA code.
+
+Experimental results show that AffineGraph achieves competitive or superior performance on key workloads including GEMM, Fused GEMM (up to 3.02$\times$ speedup), FlashAttention (up to 3.72$\times$ speedup), and Block Sparse Attention. Furthermore, experiments on NVIDIA H800 (Hopper architecture) validate the architectural portability of AffineGraph, achieving near-peak memory bandwidth utilization (approximately 89\%) on memory-bound operations.
+
+\textbf{Keywords:} Deep Learning Compiler, Hardware-aware, Data Flow Graph, Kernel Fusion, Code Generation

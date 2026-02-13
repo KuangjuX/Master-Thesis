@@ -1,0 +1,46 @@
+\section{总结和展望}
+
+\subsection{总结}
+
+随着深度神经网络的复杂度不断增长以及硬件架构日益异构化，传统的编译方法在将计算高效映射到专用执行单元方面面临着越来越大的挑战。
+本文提出了一种新型的深度学习编译器框架 AffineGraph，通过层级化的图表示和精确的内存层级转换建模，实现了硬件感知的优化。
+本文的主要工作和贡献如下：
+
+\begin{enumerate}
+    \item \textbf{基于多内存层级数据流图的硬件感知抽象。}
+    提出了 AffineGraph IR，通过仿射变换来表达内存访问模式和计算依赖关系，为优化内存受限和计算受限操作提供了统一的抽象。
+    该 IR 能够精确建模内存层级转换、嵌套循环结构和硬件特性（如 Bank Conflicts），同时支持通过谓词执行机制优雅地处理动态控制流。
+
+    \item \textbf{基于分块策略的内核融合技术。}
+    设计了硬件感知的优化策略，通过构建综合考虑计算能力、内存带宽、SRAM 与寄存器容量限制以及流水线效率的解析式代价模型，自动搜索最优的分块大小、Warp Layout 和流水线级数。
+    同时，论证了 AffineGraph 的核心抽象具有良好的架构可扩展性，能够自然地扩展到 NVIDIA Hopper 架构的 TMA、线程块集群和 Warpgroup 级操作等新特性。
+
+    \item \textbf{高效的内核映射策略。}
+    开发了基于原子块（AtomicTile）和微任务（Micro-Task）的层级执行模型，通过图降低算法将优化后的数据流图系统地转换为高性能的 CUDA 代码。
+    布局推断与变换流水线实现了从全局内存到寄存器的自动化优化。
+\end{enumerate}
+
+实验结果表明，AffineGraph 在广泛的深度学习负载上取得了具有竞争力的性能。
+在原始内存操作上，AffineGraph 相比 CUTLASS 取得了最高 33.3\% 的加速；
+在 GEMM 操作上，相比 CUTLASS 平均达到 0.92 倍性能，相比 Triton 取得 1.14 倍加速；
+在融合 GEMM 操作上展现了显著优势，相比 CUTLASS 最高取得 3.02 倍加速，相比 Triton 最高取得 3.26 倍加速；
+在 FlashAttention 上，相比 FlashAttention-2 最高取得 3.72 倍加速，相比 Triton 最高取得 3.06 倍加速；
+在 Block Sparse Attention 上，展现了处理不规则计算模式的通用能力。
+此外，在 NVIDIA H800（Hopper 架构）上的原型实验表明，AffineGraph 的核心抽象——层级化内存建模和基于仿射的访问模式分析——能够自然地扩展到更新的 GPU 架构。
+Hopper 原型在内存受限操作上达到了接近峰值的内存带宽（约 89\%），仅需指令级别的适配即可保持相同的 IR 设计，验证了本课题方法的架构可扩展性。
+
+\subsection{下一步研究计划}
+
+为了进一步完善 AffineGraph 框架并扩展其应用范围，下一步的研究将主要集中在以下几个方面：
+
+\begin{enumerate}
+    \item \textbf{完善 Hopper 架构的完整后端集成：}
+    当前 Hopper 架构的支持以原型验证为主。
+    未来计划将 Hopper 代码生成后端完整集成到编译器中，支持计算密集型操作（如 GEMM 和 FlashAttention）在 Hopper 上的自动优化，充分利用 TMA 和 Warpgroup 级 MMA 等新特性。
+    \item \textbf{扩展后端支持与算子库：} 
+    未来计划将 AffineGraph 扩展到其他硬件后端，例如 AMD GPU 或其他类型的深度学习加速器。
+    同时，将进一步丰富算子库，以支持更多种类的深度学习模型和新兴的算子模式。
+    \item \textbf{端到端模型部署与评估：} 
+    当前的评估主要集中在核心算子上。
+    下一步将进行端到端（End-to-End）的完整模型（如 Llama, Qwen 等）部署与评估，以验证 AffineGraph 在真实应用场景下的综合性能和实用性。
+\end{enumerate}

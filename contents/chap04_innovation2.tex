@@ -1,0 +1,208 @@
+\section{基于分块策略的内核融合}
+
+\subsection{硬件感知优化}
+
+AffineGraph 的有效性源于其执行硬件感知优化的能力。
+这主要通过一个复杂的硬件映射过程来实现，该过程确定了分块策略和内存访问模式。
+
+\subsubsection{分块大小与并行度确定}
+% 一个关键的变换是分块（Tiling）。
+% 分块大小和并行粒度（例如线程块和线程束配置）的确定，是结合硬件参数和启发式模型来指导的。
+% 以 NVIDIA A100 GPU 为例，本课题的方法会考虑：
+% \begin{itemize}
+%     \item \textbf{Tensor Core 形状：} 原生 MMA 指令的形状（例如 FP16 的 16x8x16）极大地影响了 Warp 级分块大小的选择。
+%     \item \textbf{内存限制：} 每个流式多处理器（SM）可用的共享内存和寄存器文件容量限制了线程块级的分块大小。
+%     \item \textbf{占用率（Occupancy）：} 通过启发式方法来选择一个能够最大化理论占用率的配置，平衡资源使用（寄存器、共享内存）和活跃线程块的数量。
+% \end{itemize}
+
+一个关键的变换是分块（Tiling）。
+分块大小和并行粒度（例如线程块和线程束配置）的确定，是结合硬件参数和解析式代价模型（Cost Model）来指导的。
+为了在巨大的搜索空间中高效地寻找到最优的配置参数，本研究构建了一个综合考虑计算能力、内存带宽、SRAM 与寄存器容量限制以及流水线效率的代价模型。
+
+\paragraph{符号定义}
+首先定义硬件参数集合 $H$ 与决策变量集合 $\Theta$。
+硬件参数 $H$ 包括：理论峰值计算能力 $P_{peak}$ (TFLOPS)，HBM 全局内存带宽 $\beta_{mem}$ (GB/s)，每 SM 的共享内存容量 $C_{SRAM}$ 和寄存器文件容量 $C_{Reg}$，L2 Cache 容量 $C_{L2}$ 等。
+决策变量 $\theta \in \Theta$ 包括：矩阵乘法的分块大小 $B_m, B_n, B_k$，软件流水线级数 $K_{stage}$，以及每线程块的 线程束数量 $N_{warp}$。
+
+\paragraph{约束模型}
+只有满足硬件资源限制的配置 $\theta$ 才是可行解。
+占用率 $O_{active}$ 定义为每个 SM 上能同时活跃的线程块数量，计算公式如下：
+
+\begin{equation}
+    O_{active}(\theta) = \min(O_{SRAM}, O_{Reg}, O_{Thread})
+\end{equation}
+
+其中 $O_{SRAM} = \lfloor \frac{C_{SRAM}}{U_{SRAM}} \rfloor$，$U_{SRAM}$ 为多级缓冲所需的共享内存用量，由 $K_{stage}$ 和分块大小决定；
+$O_{Reg} = \lfloor \frac{C_{Reg}}{U_{Reg}} \rfloor$，$U_{Reg}$ 为累加器和临时变量所需的寄存器用量；
+$O_{Thread}$ 为线程数限制。
+可行性约束要求 $O_{active}(\theta) \ge 1$。
+
+\paragraph{性能模型}
+优化的目标是最小化总执行时间 $T_{total}$。
+计算时间由 $T_{comp} = \frac{\textbf{Total FLOPs}}{P_{peak}}$ 估算。
+访存时间 $T_{mem}$ 则需要精确估算 HBM 数据传输量 $V_{HBM}$。
+模型引入了 L2 Cache 命中率建模，特别是对于 GEMM，引入矩阵 $B$ 的重读惩罚系数 $\alpha_{miss}$ 以估算 L2 驱逐的影响：
+
+\begin{equation}
+    V_{HBM} = \text{Size}(A) + \alpha_{miss} \cdot \text{Size}(B) + \text{Size}(C)
+\end{equation}
+
+此外，为了修正理想 \textit{Roofline} 模型的偏差，引入了效率惩罚系数 $\eta$。
+流水线掩盖效率 $\eta_{pipe}$ 反映了 $K_{stage}$ 对延迟掩盖的能力（例如 $K_{stage} \ge 3$ 时取 1.0）；
+Wave 量化效应 $\eta_{wave}$ 反映了当 Grid Size 不能被 GPU 并行度整除时的尾部开销。
+最终的目标函数为最大化有效吞吐量：
+
+\begin{equation}
+    T_{exec}(\theta) = \frac{\max(T_{comp}, T_{mem})}{\eta_{pipe} \cdot \eta_{wave}}
+\end{equation}
+
+\paragraph{Warp Layout 的影响}
+除了分块大小，Warp Layout ($W_m \times W_n$) 对性能也有显著影响。
+这主要体现在三个方面：
+
+\begin{description}
+    \item[1)] \textbf{寄存器重用率}：每个线程束需要从共享内存（SRAM）中加载矩阵 A 和 B 的片段到寄存器，然后执行 MMA（Matrix Multiply Accumulate）指令。我们的目标是每加载一次数据，就能尽可能多地参与后续计算，最大化寄存器的复用率。其根本原因可以通过周长与面积的数学关系表达：线程束所负责的 Tile 面积为
+$$
+\text{Area} = \left(\frac{B_m}{W_m}\right) \times \left(\frac{B_n}{W_n}\right),
+$$
+而Warp所需加载的数据量（即周长，直接影响$\mathtt{ldmatrix}$指令的发射数和SRAM带宽压力）为
+$$
+\text{Load} = \left(\frac{B_m}{W_m}\right) \times B_k + \left(\frac{B_n}{W_n}\right) \times B_k.
+$$
+因此，Warp Tile 越接近正方形，单位加载数据所能完成的运算也越多。例如在 $128 \times 128$ 的大块 (Block)，由 8 个 Warps 负责时：
+\begin{itemize}
+  \item Layout $8 \times 1$：每个线程束处理 $16 \times 128$，需加载 $A(16 \times K) + B(128 \times K)$，B 的加载量极大，带宽开销大
+  \item Layout $2 \times 4$：每个线程束处理 $64 \times 32$，需加载 $A(64 \times K) + B(32 \times K)$，整体更均衡且加载量更小
+\end{itemize}
+因此，在自动调优模型中，引入了布局惩罚系数 $\eta_{layout}$，优先搜索使 Warp Tile 尽量接近正方形（比如 $2 \times 4$）的配置组合。
+    \item[2)] \textbf{SRAM Bank Conflicts}：NVIDIA A100 的 SRAM 由 32 个 Bank 组成，如果 Warp Layout 导致多个线程并发访问同一 Bank 内的不同地址，则会出现冲突并引起访存串行化。这种冲突在极端 Layout（如 $1 \times 8$ 或 $8 \times 1$）下最易出现，即使采用了 \textit{cp.async} 或 \textit{swizzling} 优化，过分“拉长”的 W 方向或 H 方向都可能导致 Bank Conflict 增多，从而限制带宽利用率和整体性能。
+    \item[3)] \textbf{Epilogue 效率}：线程束计算完成后，累加器 C 的结果要回写至全局内存（Global Memory）。写回性能离不开合并访问（Coalescing），通常 N 方向上的内存连续性尤为重要。如果 Warp Layout 中 $W_n$ 过大（N 维度切分太细），则每个线程束写回的数据在物理内存上将变得不连续，导致写入时段内部存储请求分散、带宽激增而未有效利用。
+\end{description}
+
+因此，模型中增加了对 $W_m, W_n$ 的搜索，引入布局惩罚系数 $\eta_{layout}$，倾向于选择使 Warp Tile 接近正方形（如 $2 \times 4$）的配置以最大化性能。
+
+\paragraph{模型评估与配置生成}
+
+基于上述构建的 Cost Model，本研究实现了一个自动化的配置搜索与评估流程。具体流程如下：
+
+\begin{itemize}
+  \item 输入：以指定的算法形状（Shape）作为输入；
+  \item 搜索与评估：利用 Cost Model 对高维参数空间进行剪枝和性能评估，自动筛选出最优配置；
+  \item 配置输出：最终产出 Top 10 分块配置（即不同的 Tile Size 与布局参数组合）。
+\end{itemize}
+
+如表~\ref{table:cost_model_4096} 和表~\ref{table:cost_model_8192} 所示，分别展示了在 GEMM $4096 \times 4096 \times 4096$ 及 $8192 \times 8192 \times 8192$ 两种规模下，Cost Model 搜索出的前十组最佳配置。每组配置具体包含以下参数信息：
+
+\begin{center}
+\begin{tabular}{l l}
+\hline
+参数             & 含义 \\
+\hline
+Tile\_M, Tile\_N, Tile\_K & 分块大小（三维切分尺度） \\
+Warp Layout           & Warp 架构布局（如 $2\times4$, $4\times2$ 等）\\
+WarpTile         & 每个 Warp 负责的 Tile 尺寸 \\
+Stages           & Pipeline 阶段数 \\
+\hline
+\end{tabular}
+\end{center}
+
+这些多维度优化的分块和调度参数将自动交由 JIT（Just-In-Time）编译器，实现特定问题规模下的高性能代码生成与调优。
+
+\begin{table}[H]
+    \centering
+    \caption{GEMM $4096 \times 4096 \times 4096$ 的 Cost Model Tile Size 配置}
+    \label{table:cost_model_4096}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{lccccccccc}
+        \toprule
+        \textbf{Tile} & \textbf{Stages} & \textbf{Warps} & \textbf{Layout} & \textbf{WarpTile} & \textbf{SRAM (KB)} & \textbf{Occ} & \textbf{Eff\_Pipe} & \textbf{Eff\_Lay} & \textbf{TFLOPS} \\
+        \midrule
+        128$\times$64$\times$128 & 3 & 8 & 4$\times$2 & 32$\times$32 & 144 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$64$\times$64 & 4 & 4 & 2$\times$2 & 32$\times$32 & 64 & 2.0 & 1.0 & 1.00 & 311.39 \\
+        128$\times$64$\times$64 & 4 & 8 & 4$\times$2 & 32$\times$32 & 96 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$128$\times$64 & 4 & 8 & 2$\times$4 & 32$\times$32 & 96 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$128$\times$128 & 3 & 8 & 2$\times$4 & 32$\times$32 & 144 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$128$\times$64 & 5 & 8 & 2$\times$4 & 32$\times$32 & 120 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$64$\times$128 & 5 & 4 & 2$\times$2 & 32$\times$32 & 160 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        128$\times$64$\times$64 & 5 & 8 & 4$\times$2 & 32$\times$32 & 120 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$64$\times$64 & 5 & 4 & 2$\times$2 & 32$\times$32 & 80 & 2.0 & 1.0 & 1.00 & 311.39 \\
+        64$\times$64$\times$128 & 4 & 4 & 2$\times$2 & 32$\times$32 & 128 & 1.0 & 1.0 & 1.00 & 311.39 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\begin{table}[H]
+    \centering
+    \caption{GEMM $8192 \times 8192 \times 8192$ 的 Cost Model Tile Size 配置}
+    \label{table:cost_model_8192}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{lccccccccc}
+        \toprule
+        \textbf{Tile} & \textbf{Stages} & \textbf{Warps} & \textbf{Layout} & \textbf{WarpTile} & \textbf{SRAM (KB)} & \textbf{Occ} & \textbf{Eff\_Pipe} & \textbf{Eff\_Lay} & \textbf{TFLOPS} \\
+        \midrule
+        256$\times$128$\times$64 & 3 & 8 & 4$\times$2 & 64$\times$64 & 144 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$64$\times$64 & 3 & 4 & 4$\times$1 & 64$\times$64 & 120 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$64$\times$64 & 4 & 4 & 4$\times$1 & 64$\times$64 & 160 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$64$\times$32 & 4 & 4 & 4$\times$1 & 64$\times$64 & 80 & 2.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$64$\times$32 & 3 & 4 & 4$\times$1 & 64$\times$64 & 60 & 2.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$64$\times$32 & 5 & 4 & 4$\times$1 & 64$\times$64 & 100 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$128$\times$32 & 5 & 8 & 4$\times$2 & 64$\times$64 & 120 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$128$\times$32 & 4 & 8 & 4$\times$2 & 64$\times$64 & 96 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        256$\times$128$\times$32 & 3 & 8 & 4$\times$2 & 64$\times$64 & 72 & 1.00 & 1.00 & 1.00 & 311.39 \\
+        128$\times$256$\times$32 & 4 & 8 & 2$\times$4 & 64$\times$64 & 96 & 1.00 & 1.00 & 1.00 & 297.38 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\subsection{层级执行模型}
+为了将高级操作有效地映射到 GPU 的并行架构上，AffineGraph 采用了一种基于 \textbf{原子块（AtomicTile）} 和 \textbf{微任务（Micro-Task）} 两个核心概念的层级执行模型。
+\begin{itemize}
+    \item \textbf{原子块（AtomicTile）：} 本课题将原子块定义为计算的基本逻辑单元，代表编译器调度的最小矩阵运算（例如 16x16 矩阵乘法）。它指定了需要完成的计算内容。
+    \item \textbf{微任务（Micro-Task）：} 微任务是实现原子块的物理执行序列。它定义了一个线程束如何执行逻辑计算，协调一系列硬件级操作，包括跨内存层级的数据移动和核心计算，如图~\ref{figure:micro-task-matmul-reduce}所示。
+\end{itemize}
+通过将逻辑计算单元（原子块）与其物理执行计划（微任务）分离，AffineGraph 能够系统地管理代码生成的复杂性，同时确保高效的硬件利用率。
+
+\begin{figure}%[h]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/micro-task-matmul-reduce.pdf}
+  \caption{基于微任务的 GEMM-Reduce 在 NVIDIA Ampere GPU 上的执行模型。该图展示了一个线程束实现原子块的物理执行序列，展示了通过 \texttt{cp.async} 和 \texttt{ldmatrix} 指令在内存层次结构（全局内存 $\rightarrow$ 共享内存 $\rightarrow$ 寄存器）之间的数据移动，随后是 Tensor Core MMA 计算和累加。K 循环表示在 K 维度上的迭代归约。}
+  \label{figure:micro-task-matmul-reduce}
+\end{figure}
+
+\subsection{高效内存访问优化}
+生成高效微任务的一个关键组成部分是优化内存访问，如图~\ref{fig:effective_memory_access}所示。
+\begin{itemize}
+    \item \textbf{全局内存访问：} AffineGraph 根据线程束配置优化全局内存访问模式。一个关键的硬件约束是单个线程束的内存事务不能超过 128 字节，这对应于 L1 缓存行的大小。AffineGraph 利用这一知识为给定的张量形状选择最优的线程束组织，从而最小化带宽浪费。
+    \item \textbf{共享内存 Swizzling：} 为了减少共享内存的 Bank Conflicts，AffineGraph 应用了 Swizzling 技术来优化共享内存布局。编译器使用即时编译（JIT）来评估不同的策略，并选择能够在避免 Bank Conflicts 和内存压力之间取得平衡的最优方法。
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/effective_memory_access.pdf}
+\caption{NVIDIA GPU 上的高效内存访问优化策略}
+\label{fig:effective_memory_access}
+\end{figure}
+
+\subsection{面向 Hopper 架构的可扩展性}\label{sec:hopper-extension}
+
+AffineGraph 设计的一个关键优势在于其架构可扩展性。
+核心抽象——仿射映射（AffineMap）、层级化内存建模和微任务（MicroTask）——并不局限于某一特定的 GPU 代际。
+为了验证这一点，本节讨论 AffineGraph 如何自然地扩展到 NVIDIA Hopper（SM90）架构的新特性。
+
+\paragraph{张量内存加速器（TMA）}
+Hopper 架构引入了张量内存加速器（Tensor Memory Accelerator, TMA），用于在全局内存和共享内存之间进行硬件加速的异步批量数据传输。
+在 AffineGraph 的 IR 中，TMA 操作被建模为专用的仿射边（AffineEdge），用于全局内存到共享内存（GMEM$\rightarrow$SMEM）的传输。
+其中数据移动被卸载到专用硬件引擎，而非依赖逐线程的地址计算。
+仿射映射对访问模式的编码保持不变；仅在代码生成阶段（算法~\ref{alg:codegen}），\textsc{InstructionForLoad} 函数选择 TMA 描述符和 \texttt{cp.async.bulk} 指令，替代逐线程的 \texttt{cp.async} 指令。
+
+\paragraph{线程块集群（Thread Block Clusters）}
+Hopper 在执行层级中引入了一个新的层次——协作线程块集群（Cluster），集群内的线程块可以直接访问彼此的共享内存。
+AffineGraph 的层级化子图节点（SubGraph Node）抽象能够自然地容纳这一扩展，只需在线程块之上引入一个额外的嵌套层级，将现有的 Thread$\rightarrow$Warp$\rightarrow$Block 层级扩展为 Thread$\rightarrow$Warp$\rightarrow$Block$\rightarrow$Cluster。
+这一扩展使得集群级别的协作数据加载和跨块共享内存访问成为可能，而无需对 IR 设计进行根本性的改变。
+
+\paragraph{Warpgroup 级操作}
+Hopper 支持 Warpgroup（128 线程）级别的集合操作，包括用于 Tensor Core 运算的 \texttt{wgmma} 指令。
+在 AffineGraph 中，这些操作自然地表示为具有更大原子块（AtomicTile）形状的算子节点，其中微任务执行计划协调 Warpgroup 级别的计算，而非单个 Warp 级别的 MMA。
+分块大小确定的启发式方法也相应扩展，以考虑 Warpgroup 粒度以及 Hopper 增大的寄存器文件和共享内存容量。
