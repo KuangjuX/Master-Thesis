@@ -1,0 +1,425 @@
+%---------------------------------------------------------------------------%
+%-                                                                         -%
+%-                             Bibliography                                -%
+%-                                                                         -%
+%---------------------------------------------------------------------------%
+@article{dao2022flashattention,
+  title={Flashattention: Fast and memory-efficient exact attention with io-awareness},
+  author={Dao, Tri and Fu, Dan and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
+  journal={Advances in Neural Information Processing Systems},
+  volume={35},
+  pages={16344--16359},
+  year={2022}
+}
+
+@article{dao2023flashattention,
+  title={Flashattention-2: Faster attention with better parallelism and work partitioning},
+  author={Dao, Tri},
+  journal={arXiv preprint arXiv:2307.08691},
+  year={2023}
+}
+
+@article{shah2024flashattention,
+  title={Flashattention-3: Fast and accurate attention with asynchrony and low-precision},
+  author={Shah, Jay and Bikshandi, Ganesh and Zhang, Ying and Thakkar, Vijay and Ramani, Pradeep and Dao, Tri},
+  journal={arXiv preprint arXiv:2407.08608},
+  year={2024}
+}
+
+@article{milakov2018online,
+  title={Online normalizer calculation for softmax},
+  author={Milakov, Maxim and Gimelshein, Natalia},
+  journal={arXiv preprint arXiv:1805.02867},
+  year={2018}
+}
+
+@inproceedings{tvm/chen2018tvm,
+  title={$\{$TVM$\}$: An automated $\{$End-to-End$\}$ optimizing compiler for deep learning},
+  author={Chen, Tianqi and Moreau, Thierry and Jiang, Ziheng and Zheng, Lianmin and Yan, Eddie and Shen, Haichen and Cowan, Meghan and Wang, Leyuan and Hu, Yuwei and Ceze, Luis and others},
+  booktitle={13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18)},
+  pages={578--594},
+  year={2018}
+}
+
+@inproceedings{tvm/zheng2020ansor,
+  title={Ansor: Generating $\{$High-Performance$\}$ tensor programs for deep learning},
+  author={Zheng, Lianmin and Jia, Chengfan and Sun, Minmin and Wu, Zhao and Yu, Cody Hao and Haj-Ali, Ameer and Wang, Yida and Yang, Jun and Zhuo, Danyang and Sen, Koushik and others},
+  booktitle={14th USENIX symposium on operating systems design and implementation (OSDI 20)},
+  pages={863--879},
+  year={2020}
+}
+
+@inproceedings{tvm/roesch2018relay,
+  title={Relay: A new ir for machine learning frameworks},
+  author={Roesch, Jared and Lyubomirsky, Steven and Weber, Logan and Pollock, Josh and Kirisame, Marisa and Chen, Tianqi and Tatlock, Zachary},
+  booktitle={Proceedings of the 2nd ACM SIGPLAN international workshop on machine learning and programming languages},
+  pages={58--68},
+  year={2018}
+}
+
+@article{tvm/lai2023relax,
+  title={Relax: Composable Abstractions for End-to-End Dynamic Machine Learning},
+  author={Lai, Ruihang and Shao, Junru and Feng, Siyuan and Lyubomirsky, Steven S and Hou, Bohan and Lin, Wuwei and Ye, Zihao and Jin, Hongyi and Jin, Yuchen and Liu, Jiawei and others},
+  journal={arXiv preprint arXiv:2311.02103},
+  year={2023}
+}
+
+@article{tvm/xing2022bolt,
+  title={Bolt: Bridging the gap between auto-tuners and hardware-native performance},
+  author={Xing, Jiarong and Wang, Leyuan and Zhang, Shang and Chen, Jack and Chen, Ang and Zhu, Yibo},
+  journal={Proceedings of Machine Learning and Systems},
+  volume={4},
+  pages={204--216},
+  year={2022}
+}
+
+@software{CUTLASS,
+  author = {{NVIDIA Corporation}},
+  title = {CUTLASS},
+  url = {https://github.com/NVIDIA/cutlass},
+  year = {2024}
+}
+
+@software{TensorRT,
+  author = {{NVIDIA Corporation}},
+  title = {TensorRT},
+  url = {https://github.com/NVIDIA/TensorRT},
+  year = {2024}
+}
+
+@misc{nvidia-a100,
+  author       = {{NVIDIA Corporation}},
+  title        = {NVIDIA A100 Tensor Core GPU},
+  year         = {2024},
+  howpublished = {EB/OL},
+  url          = {https://www.nvidia.com/en-sg/data-center/a100/},
+  note         = {Accessed: 2024-12-01}
+}
+
+
+@inproceedings{isca/zheng2022amos,
+  title={AMOS: enabling automatic mapping for tensor computations on spatial accelerators with hardware abstraction},
+  author={Zheng, Size and Chen, Renze and Wei, Anjiang and Jin, Yicheng and Han, Qin and Lu, Liqiang and Wu, Bingyang and Li, Xiuhong and Yan, Shengen and Liang, Yun},
+  booktitle={Proceedings of the 49th Annual International Symposium on Computer Architecture},
+  pages={874--887},
+  year={2022}
+}
+
+@article{nips/chen2018learning,
+  title={Learning to optimize tensor programs},
+  author={Chen, Tianqi and Zheng, Lianmin and Yan, Eddie and Jiang, Ziheng and Moreau, Thierry and Ceze, Luis and Guestrin, Carlos and Krishnamurthy, Arvind},
+  journal={Advances in Neural Information Processing Systems},
+  volume={31},
+  year={2018}
+}
+
+@misc{xla,
+  author       = {Chris, Leary and Todd, Wang},
+  title        = {XLA: TensorFlow, Compiler!},
+  year         = {2017},
+  note         = {TensorFlow Dev Summit}
+}
+
+@inproceedings{cgo/baghdadi2019tiramisu,
+  title={Tiramisu: A polyhedral compiler for expressing fast and portable code},
+  author={Baghdadi, Riyadh and Ray, Jessica and Romdhane, Malek Ben and Del Sozzo, Emanuele and Akkas, Abdurrahman and Zhang, Yunming and Suriana, Patricia and Kamil, Shoaib and Amarasinghe, Saman},
+  booktitle={2019 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)},
+  pages={193--205},
+  year={2019},
+  organization={IEEE}
+}
+
+@inproceedings{pldi/tillet2019triton,
+  title={Triton: an intermediate language and compiler for tiled neural network computations},
+  author={Tillet, Philippe and Kung, Hsiang-Tsung and Cox, David},
+  booktitle={Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages},
+  pages={10--19},
+  year={2019}
+}
+
+@article{TPDS/li2020deep,
+  title={The deep learning compiler: A comprehensive survey},
+  author={Li, Mingzhen and Liu, Yi and Liu, Xiaoyan and Sun, Qingxiao and You, Xin and Yang, Hailong and Luan, Zhongzhi and Gan, Lin and Yang, Guangwen and Qian, Depei},
+  journal={IEEE Transactions on Parallel and Distributed Systems},
+  volume={32},
+  number={3},
+  pages={708--727},
+  year={2020},
+  publisher={IEEE}
+}
+
+@inproceedings{pldi/zhao2021akg,
+  title={AKG: automatic kernel generation for neural processing units using polyhedral transformations},
+  author={Zhao, Jie and Li, Bojie and Nie, Wang and Geng, Zhen and Zhang, Renwei and Gao, Xiong and Cheng, Bin and Wu, Chen and Cheng, Yun and Li, Zheng and others},
+  booktitle={Proceedings of the 42nd ACM SIGPLAN International Conference on Programming Language Design and Implementation},
+  pages={1233--1248},
+  year={2021}
+}
+
+@inproceedings{pldi/tang2022freetensor,
+  title={FreeTensor: a free-form DSL with holistic optimizations for irregular tensor programs},
+  author={Tang, Shizhi and Zhai, Jidong and Wang, Haojie and Jiang, Lin and Zheng, Liyan and Yuan, Zhenhao and Zhang, Chen},
+  booktitle={Proceedings of the 43rd ACM SIGPLAN International Conference on Programming Language Design and Implementation},
+  pages={872--887},
+  year={2022}
+}
+
+@inproceedings{verdoolaege2010isl,
+  title={isl: An integer set library for the polyhedral model},
+  author={Verdoolaege, Sven},
+  booktitle={International Congress on Mathematical Software},
+  pages={299--302},
+  year={2010},
+  organization={Springer}
+}
+
+@Inbook{Blaschek1994,
+author="Blaschek, G{\"u}nther",
+title="The Omega Library",
+bookTitle="Object-Oriented Programming: with Prototypes",
+year="1994",
+publisher="Springer Berlin Heidelberg",
+address="Berlin, Heidelberg",
+pages="213--283",
+abstract="This chapter discusses the most important aspects of the Omega library. It does not explain all elements, but just those that are most frequently used in the solution of a problem. The intention of this chapter is to give the reader an idea of what the library contains and how its parts can be reused. As the Omega library closely follows the design principles of other object-oriented libraries, this chapter should also give the reader some insight into object-oriented libraries in general.",
+isbn="978-3-642-78077-6",
+doi="10.1007/978-3-642-78077-6_6",
+url="https://doi.org/10.1007/978-3-642-78077-6_6"
+}
+
+@article{pip,
+  title={Parametric integer programming},
+  author={Feautrier, Paul},
+  journal={RAIRO-Operations Research},
+  volume={22},
+  number={3},
+  pages={243--268},
+  year={1988},
+  publisher={EDP Sciences}
+}
+
+@misc{loechner1999polylib,
+  title={PolyLib: A library for manipulating parameterized polyhedra},
+  author={Loechner, Vincent},
+  year={1999},
+  publisher={Citeseer}
+}
+
+@inproceedings{cgo/lattner2021mlir,
+  title={MLIR: Scaling compiler infrastructure for domain specific computation},
+  author={Lattner, Chris and Amini, Mehdi and Bondhugula, Uday and Cohen, Albert and Davis, Andy and Pienaar, Jacques and Riddle, River and Shpeisman, Tatiana and Vasilache, Nicolas and Zinenko, Oleksandr},
+  booktitle={2021 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)},
+  pages={2--14},
+  year={2021},
+  organization={IEEE}
+}
+
+@article{arxiv/peng2023rwkv,
+  title={Rwkv: Reinventing rnns for the transformer era},
+  author={Peng, Bo and Alcaide, Eric and Anthony, Quentin and Albalak, Alon and Arcadinho, Samuel and Biderman, Stella and Cao, Huanqi and Cheng, Xin and Chung, Michael and Grella, Matteo and others},
+  journal={arXiv preprint arXiv:2305.13048},
+  year={2023}
+}
+
+@article{arxiv/dao2024transformers,
+  title={Transformers are SSMs: Generalized models and efficient algorithms through structured state space duality},
+  author={Dao, Tri and Gu, Albert},
+  journal={arXiv preprint arXiv:2405.21060},
+  year={2024}
+}
+
+@article{arxiv/yang2023gated,
+  title={Gated linear attention transformers with hardware-efficient training},
+  author={Yang, Songlin and Wang, Bailin and Shen, Yikang and Panda, Rameswar and Kim, Yoon},
+  journal={arXiv preprint arXiv:2312.06635},
+  year={2023}
+}
+
+@inproceedings{osdi/shi2023welder,
+  title={Welder: Scheduling deep learning memory access via tile-graph},
+  author={Shi, Yining and Yang, Zhi and Xue, Jilong and Ma, Lingxiao and Xia, Yuqing and Miao, Ziming and Guo, Yuxiao and Yang, Fan and Zhou, Lidong},
+  booktitle={17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23)},
+  pages={701--718},
+  year={2023}
+}
+
+@inproceedings{sosp/zheng2023pit,
+  title={Pit: Optimization of dynamic sparse deep learning models via permutation invariant transformation},
+  author={Zheng, Ningxin and Jiang, Huiqiang and Zhang, Quanlu and Han, Zhenhua and Ma, Lingxiao and Yang, Yuqing and Yang, Fan and Zhang, Chengruidong and Qiu, Lili and Yang, Mao and others},
+  booktitle={Proceedings of the 29th Symposium on Operating Systems Principles},
+  pages={331--347},
+  year={2023}
+}
+
+@article{chetlur2014cudnn,
+  author       = {Sharan Chetlur and
+                  Cliff Woolley and
+                  Philippe Vandermersch and
+                  Jonathan Cohen and
+                  John Tran and
+                  Bryan Catanzaro and
+                  Evan Shelhamer},
+  title        = {cuDNN: Efficient Primitives for Deep Learning},
+  journal      = {CoRR},
+  volume       = {abs/1410.0759},
+  year         = {2014},
+  url          = {http://arxiv.org/abs/1410.0759},
+  eprinttype    = {arXiv},
+  eprint       = {1410.0759},
+  timestamp    = {Mon, 13 Aug 2018 16:48:28 +0200},
+  biburl       = {https://dblp.org/rec/journals/corr/ChetlurWVCTCS14.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
+}
+
+@article{arxiv/spector2024thunderkittens,
+  title={ThunderKittens: Simple, Fast, and Adorable AI Kernels},
+  author={Spector, Benjamin F and Arora, Simran and Singhal, Aaryan and Fu, Daniel Y and R{\'e}, Christopher},
+  journal={arXiv preprint arXiv:2410.20399},
+  year={2024}
+}
+
+@inproceedings{osdi/zhu2022roller,
+  title={$\{$ROLLER$\}$: Fast and efficient tensor compilation for deep learning},
+  author={Zhu, Hongyu and Wu, Ruofan and Diao, Yijia and Ke, Shanbin and Li, Haoyu and Zhang, Chen and Xue, Jilong and Ma, Lingxiao and Xia, Yuqing and Cui, Wei and others},
+  booktitle={16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22)},
+  pages={233--248},
+  year={2022}
+}
+
+@article{nips/vaswani2017attention,
+  title={Attention is all you need},
+  author={Vaswani, A},
+  journal={Advances in Neural Information Processing Systems},
+  year={2017}
+}
+
+@article{nips/paszke2019pytorch,
+  title={Pytorch: An imperative style, high-performance deep learning library},
+  author={Paszke, Adam and Gross, Sam and Massa, Francisco and Lerer, Adam and Bradbury, James and Chanan, Gregory and Killeen, Trevor and Lin, Zeming and Gimelshein, Natalia and Antiga, Luca and others},
+  journal={Advances in neural information processing systems},
+  volume={32},
+  year={2019}
+}
+
+@inproceedings{asplos/ansel2024pytorch,
+  title={Pytorch 2: Faster machine learning through dynamic python bytecode transformation and graph compilation},
+  author={Ansel, Jason and Yang, Edward and He, Horace and Gimelshein, Natalia and Jain, Animesh and Voznesensky, Michael and Bao, Bin and Bell, Peter and Berard, David and Burovski, Evgeni and others},
+  booktitle={Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2},
+  pages={929--947},
+  year={2024}
+}
+
+@article{arxiv/fu2023flashfftconv,
+  title={Flashfftconv: Efficient convolutions for long sequences with tensor cores},
+  author={Fu, Daniel Y and Kumbong, Hermann and Nguyen, Eric and R{\'e}, Christopher},
+  journal={arXiv preprint arXiv:2311.05908},
+  year={2023}
+}
+
+@article{arxiv/graef2024flash,
+  title={Flash normalization: fast RMSNorm for LLMs},
+  author={Graef, Nils and Clapp, Matthew and Wasielewski, Andrew},
+  journal={arXiv preprint arXiv:2407.09577},
+  year={2024}
+}
+
+@article{zheng2023bladedisc,
+  title={Bladedisc: Optimizing dynamic shape machine learning workloads via compiler approach},
+  author={Zheng, Zhen and Pan, Zaifeng and Wang, Dalin and Zhu, Kai and Zhao, Wenyi and Guo, Tianyou and Qiu, Xiafei and Sun, Minmin and Bai, Junjie and Zhang, Feng and others},
+  journal={Proceedings of the ACM on Management of Data},
+  volume={1},
+  number={3},
+  pages={1--29},
+  year={2023},
+  publisher={ACM New York, NY, USA}
+}
+
+@article{osdi/zheng2023einnet,
+  title={EINNET: Optimizing Tensor Programs with Derivation-Based Transformations},
+  author={Zheng, Liyan and Wang, Haojie and Zhai, Jidong and Hu, Muyan and Ma, Zixuan and Wang, Tuowei and Huang, Shuhong and Miao, Xupeng and Tang, Shizhi and Huang, Kezhao and Jia, Zhihao},
+  booktitle={17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23)},
+  pages={739--755},
+  year={2023}
+}
+
+@inproceedings{osdi/wang2021pet,
+  title={PET: Optimizing tensor programs with partially equivalent transformations and automated corrections},
+  author={Wang, Haojie and Zhai, Jidong and Gao, Mingyu and Ma, Zixuan and Tang, Shizhi and Zheng, Liyan and Li, Yuanzhi and Rong, Kaiyuan and Chen, Yuanyong and Jia, Zhihao},
+  booktitle={15th USENIX Symposium on Operating Systems Design and Implementation (OSDI 21)},
+  pages={37--54},
+  year={2021}
+}
+
+@inproceedings{hpca/mei2023defines,
+  title={Defines: Enabling fast exploration of the depth-first scheduling space for dnn accelerators through analytical modeling},
+  author={Mei, Linyan and Goetschalckx, Koen and Symons, Arne and Verhelst, Marian},
+  booktitle={2023 IEEE International Symposium on High-Performance Computer Architecture (HPCA)},
+  pages={570--583},
+  year={2023},
+  organization={IEEE}
+}
+
+@inproceedings{osdi/wang2024ladder,
+  title={Ladder: Enabling Efficient $\{$Low-Precision$\}$ Deep Learning Computing through Hardware-aware Tensor Transformation},
+  author={Wang, Lei and Ma, Lingxiao and Cao, Shijie and Zhang, Quanlu and Xue, Jilong and Shi, Yining and Zheng, Ningxin and Miao, Ziming and Yang, Fan and Cao, Ting and others},
+  booktitle={18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24)},
+  pages={307--323},
+  year={2024}
+}
+
+
+@inproceedings{osdi/abadi2016tensorflow,
+  title={$\{$TensorFlow$\}$: a system for $\{$Large-Scale$\}$ machine learning},
+  author={Abadi, Mart{\'\i}n and Barham, Paul and Chen, Jianmin and Chen, Zhifeng and Davis, Andy and Dean, Jeffrey and Devin, Matthieu and Ghemawat, Sanjay and Irving, Geoffrey and Isard, Michael and others},
+  booktitle={12th USENIX symposium on operating systems design and implementation (OSDI 16)},
+  pages={265--283},
+  year={2016}
+}
+
+@article{arxiv/chen2015mxnet,
+  title={Mxnet: A flexible and efficient machine learning library for heterogeneous distributed systems},
+  author={Chen, Tianqi and Li, Mu and Li, Yutian and Lin, Min and Wang, Naiyan and Wang, Minjie and Xiao, Tianjun and Xu, Bing and Zhang, Chiyuan and Zhang, Zheng},
+  journal={arXiv preprint arXiv:1512.01274},
+  year={2015}
+}
+
+@article{hochreiter1997lstm,
+  title={Long Short-term Memory},
+  author={Hochreiter, S},
+  journal={Neural Computation MIT-Press},
+  year={1997}
+}
+
+@article{lecun1998cnn,
+  title={Gradient-based learning applied to document recognition},
+  author={LeCun, Yann and Bottou, L{\'e}on and Bengio, Yoshua and Haffner, Patrick},
+  journal={Proceedings of the IEEE},
+  volume={86},
+  number={11},
+  pages={2278--2324},
+  year={1998},
+  publisher={Ieee}
+}
+
+@article{rumelhart1986rnn,
+  title={Learning representations by back-propagating errors},
+  author={Rumelhart, David E and Hinton, Geoffrey E and Williams, Ronald J},
+  journal={nature},
+  volume={323},
+  number={6088},
+  pages={533--536},
+  year={1986},
+  publisher={Nature Publishing Group UK London}
+}
+
+@article{goodfellow2020gan,
+  title={Generative adversarial networks},
+  author={Goodfellow, Ian and Pouget-Abadie, Jean and Mirza, Mehdi and Xu, Bing and Warde-Farley, David and Ozair, Sherjil and Courville, Aaron and Bengio, Yoshua},
+  journal={Communications of the ACM},
+  volume={63},
+  number={11},
+  pages={139--144},
+  year={2020},
+  publisher={ACM New York, NY, USA}
+}
+%---------------------------------------------------------------------------%

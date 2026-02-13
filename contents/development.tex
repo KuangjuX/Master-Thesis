@@ -1,0 +1,123 @@
+% \subsection{深度学习编译器的发展现状}
+
+本文经过详尽的调研，发现当前工业界与学术界的深度学习编译器大致分为三类，一类是以 TVM~\cite{tvm/chen2018tvm}，XLA~\cite{xla} 为代表的以 DAG 作为前端表示的深度学习编译器；一类是以 Tiramisu~\cite{cgo/baghdadi2019tiramisu} 为代表的基于多面体模型的深度学习编译器；一类是以 Triton~\cite{pldi/tillet2019triton} 为代表的硬件感知的深度学习编译器。下面将对这几种类型进行详细的介绍。
+
+\subsubsection{基于 DAG 的深度学习编译器}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/tvm.png}
+    \caption{TVM 深度学习编译器架构~\cite{tvm/chen2018tvm}}
+    \label{figure:tvm}
+\end{figure}
+
+基于DAG的中间表示是编译器构建计算图的最传统方式之一，其节点和边以有向无环图（DAG）的形式组织。在深度学习编译器中，DAG 的节点代表原子深度学习操作（如卷积、池化等），边则代表张量。该图是无环的，没有循环，这与通用编译器的数据依赖图（DDG）有所不同。借助 DAG 计算图，深度学习编译器可以分析各种操作之间的关系和依赖性，并利用这些信息指导优化。已经有许多针对DDG的优化技术，例如公共子表达式消除（CSE）和死代码消除（DCE）。目前以 DAG 作为前端表示的深度学习编译器与框架有 TVM~\cite{tvm/chen2018tvm}，XLA~\cite{xla}，Pytorch~\cite{nips/paszke2019pytorch} 等。
+
+TVM~\cite{tvm/chen2018tvm} 是当前最流行的端到端的以 DAG 作为前端表示的深度学习编译器。在 TVM 中采用低级循环程序合成技术对性能进行微调，采用类似爱因斯坦求和的张量表达语言来详细说明张量运算符如何执行数值运算~\cite{tvm/lai2023relax, tvm/roesch2018relay}。TVM 的整体系统架构如图 ~\ref{figure:tvm} 所示。
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Ansor.png}
+    \caption{Ansor 系统设计~\cite{tvm/zheng2020ansor}}
+    \label{figure:Ansor}
+\end{figure}
+
+在 TVM 中引入了基于搜索的自动调优方法，AutoTVM~\cite{nips/chen2018learning} 可以通过事先编写模版来组成调度的搜索空间，然而这对模版的编写带来了很高的要求，Ansor~\cite{tvm/zheng2020ansor} 更进一步可以自动生成一个覆盖全面的优化搜索空间并为每个张量程序提供被选择的机会，同时通过 Auto-tunning 得到性能最好的模版，Ansor 的系统架构如图~\ref{figure:Ansor}。尽管这种方法对于用户来说很容易使用，但编译器的自动调度可能会导致高复杂性，张量表达式在内部很快被转换为循环表达，导致抽象很快丢失。
+
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/BOLT.png}
+    \caption{BOLT 系统设计~\cite{tvm/xing2022bolt}}
+    \label{figure:BOLT}
+\end{figure}
+
+然而自动调优技术无法对于硬件进行感知，只能优化代码在通用计算核心运行，通常无法发挥出硬件的最大潜力，从而导致性能不佳。为了解决自动调优对于硬件感知不够的问题，TVM 尝试引入具有临时语义的算子与硬件模版库，例如 BOLT 通过使用 CUTLASS~\cite{CUTLASS} 手写融合矩阵乘及卷积算法，在共享内存以及寄存器内存中进行数据复用，从而减少算子间加载和存储内存的次数，减少内核启动的消耗以及扩大优化范围以探索更多指令调度。BOLT 的系统设计如图~\ref{figure:BOLT}所示。
+
+然而，基于临时语义的解决方案很难应对不断发展的 DNN 算法，并且基于临时语义的解决方案也可能破环整体软件栈的概念性，使得其变得极为臃肿与复杂。
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/AMOS.png}
+    \caption{AMOS 系统设计~\cite{isca/zheng2022amos}}
+    \label{figure:AMOS}
+\end{figure}
+
+AMOS~\cite{isca/zheng2022amos} 中提出了一种更加通用的 IR 来充分利用硬件特性，如图\ref{figure:AMOS}所示。AMOS 将计算加速器从软件到硬件的映射方式分为硬件感知和指令集感知。硬件感知知晓硬件架构的细节信息，比如 PE 数量，PE 间互联方式，这样软硬件映射过程可以转化为一个在给定硬件约束下的优化问题；指令集感知是映射过程对于硬件架构无感知，只根据对外暴露的指令集进行软硬件映射。
+
+AMOS 通过引入的新的 IR，进一步提出了计算、内存抽象，输入是由 Python 编写的高层次代码和基于计算和方寸抽象出的硬件指令，然后生成不同的映射组合，一个映射组合由计算映射和访问映射组成。计算映射是将算子转换为计算指令映射到加速器上；访存映射通过访存指令描述数据的访问和存储行为。AMOS 的映射过程分为两个阶段，第一阶段将循环迭代映射到虚拟加速器上，第二阶段加入硬件资源和指令集限制，调整映射过程并将其映射到真实的物理加速器上。
+
+尽管 AMOS 在很大程度上引入了编译器对于硬件的感知，但是在 DSL 层面没有引入硬件特性，基于分析的优化方法依然无法完全发挥出硬件的性能。同时将 AMOS 引入 TVM 等端到端的深度学习编译器依然是一个 ad-hoc 的方法，尽管这可能在某些领域有效但在某些方面可能会失去效果甚至变得更差，同时也会破坏开源软件栈的一致性。
+
+\subsubsection{基于多面体模型的深度学习编译器}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/Tiramisu.png}
+    \caption{Tiramisu 系统设计~\cite{cgo/baghdadi2019tiramisu}}
+    \label{figure:Tiramisu}
+\end{figure}
+
+与基于 DAG 的深度学习编译器不同，基于 Polyhedral 的深度学习编译器使用线性规划、放身边换和其他数学方法来优化具有边界和分支静态控制流的基于循环的代码~\cite{TPDS/li2020deep}。与 DAG-based IR 相比，多面体模型中内存引用和循环嵌套的边界可以是具有任意形状的多面体。这种灵活性使多面体模型在通用编译器中得到广泛应用。一些流行的深度学习编译器例如 Tiramisu~\cite{cgo/baghdadi2019tiramisu}，AKG~\cite{pldi/zhao2021akg}，FreeTensor~\cite{pldi/tang2022freetensor} 等都采用了多面体模型。基于多面体模型的优势在于可以可以基于多面体 IR 轻松应用各种多面体变换，例如融合、平铺、下沉和映射，包括设备相关和设备无关的优化，除此之外也可以复用许多多面体的后端工具链，例如 isl~\cite{verdoolaege2010isl}，Omega~\cite{Blaschek1994}，PIP~\cite{pip}，PolyLib~\cite{loechner1999polylib}。然而，尽管基于多面体的编译器非常灵活，但这种灵活也阻碍了与调优机制的集成，同时也很难对硬件信息有强烈的感知。
+
+Tiramisu~\cite{cgo/baghdadi2019tiramisu} 是其中比较有代表性的基于多面体模型编译器，系统设计如图 ~\ref{figure:Tiramisu} 所示。Tiramisu 设计了四级 IR，分为算法层，通信层，数据格式层和代码转换层。Tiramisu 提供了一种基于循环表达式的调度语言用来表达算法，同时提供了一些高级调度命令，用于常见的优化，例如 Loop Tilling, Splitting, Shifting 等。随后 Tiramisu 在多层 IR 的优化下被编译到具体的硬件代码。Tiramisu 支持多种硬件的代码生成，例如 CUDA，CPU，FPGA 以及分布式系统等架构。
+
+然而，尽管 Tiramisu 在通用性上十分优秀，并且可以基于开源的多面体工具链进行分析与优化。然而，基于多面体模型的调度语言很难去考虑具体的硬件信息；同时，由于现代体系结构不同的分块策略对于性能的影响非常大，基于多面体模型的编译器对于分块策略以及自动调优的支持不是很好，导致其生成的代码质量较为一般。
+
+\subsubsection{硬件感知的深度学习编译器}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/triton-kernel-compilation-stages.jpg}
+    \caption{Triton Kernel 编译流程~\cite{pldi/tillet2019triton}}
+    \label{figure:triton}
+\end{figure}
+
+相较于 DAG-based 的编译器以及 polyhedral-based 的编译器，以 Triton~\cite{pldi/tillet2019triton} 为代表的深度学习编译器更加关注于对于具体硬件的感知与适配，Triton 在 DSL 中引入了 load, store, dot, swizzle2d 等运算符，这些运算符都是以 NVIDIA GPU 为核心进行设计的，具有很强的硬件感知能力，能够非常高效地生成 CUDA 代码。
+
+当前 Triton 基于 MLIR~\cite{cgo/lattner2021mlir} 进行构建。MLIR 收到 LLVM 的高度影响，是一种比 LLVM 更纯粹的编译器基础设施。MLIR 重用许多 LLVM 中的思想和接口，位于模型表示和代码生成之间。MLIR 具有灵活的类型系统，允许多个抽象层次，并引入了方言(dialects)来表示多个抽象层次。每个方言由一组定义的不可变操作组成。MLIR 支持方言间的灵活转换，此外，MLIR 还可以创建新的方言，以连接到新的底层编译器，为硬件开发者和编译器研究人员铺平了道路。
+
+Triton Kernel 编译流程如图 ~\ref{figure:triton} 所示，Triton 自定义了 TTIR(Trition Tensor Intermediate Representation)、TTGIR(Triton GPU Intermediate Representation) 以及 TTLLIR(Triton Low-Level Intermediate Representation)，分别对应从张量映射到 GPU 执行模型再到底层表示，最后被编译到 LLVM IR 并生成 PTX。Triton 也提供了 JIT 编译，能够根据用户配置的分块策略进行自动调度并筛选出最好的分块策略。
+
+Triton 用户可以在 GPU 共享内存上进行编程并制定分块策略，这无异于极大提高了用户的可编程性并能充分发挥硬件性能，同时 Triton 也对 Auto Tunning 有较好的支持，能够筛选出最好的分块策略。然而，Triton 的局限性在于仍然无法在寄存器内存进行编程，因此无法在寄存器内存进行数据复用。同时也对算法描述进行了一定的限制。
+
+
+\subsubsection{基于分块的内核融合技术}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/DeFiNes.png}
+    \caption{不同融合技术~\cite{hpca/mei2023defines}}
+    \label{figure:DeFiNES}
+\end{figure}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/FlashAttention.png}
+    \caption{FlashAttention-v2 算法流程~\cite{dao2023flashattention}}
+    \label{figure:FlashAttention}
+\end{figure}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Welder.png}
+    \caption{Welder 系统设计~\cite{osdi/shi2023welder}}
+    \label{figure:Welder}
+\end{figure}
+
+当前内核融合技术逐渐从算子融合、层融合逐渐转向了以 Tile 融合，在 DeFiNES~\cite{hpca/mei2023defines} 中展示了当前融合技术的变化，如图~\ref{figure:DeFiNES} 所示。原因在于基于 Tile 的融合方式相比算子融合与层融合能够更大程度对内存进行复用，减少内存搬入搬出次数；同时基于 Tile 进行切分也更有利于对不同块并行化，极大地加速了内核执行性能。FlashAttention-v2 是其中最具知名度的基于 Tile 进行融合的例子，FlashAttention-v2 的算法设计如图 ~\ref{figure:FlashAttention}。FlashAttention-v2 通过 Tile 的融合技术将矩阵 Q, K, V 进行切分并不断加载到共享内存中并再次切块加载入寄存器内存中，随后执行 mma 计算并进行 renorm。FlashAttention-v2 相比于传统的多头 Attention 具有极大的性能优势，增加了内存复用与并行度，减少了内存压力。
+
+当前也有一些基于 Tile 进行融合的技术被运用在深度学习编译器中，例如 Roller~\cite{osdi/zhu2022roller}，Welder~\cite{osdi/shi2023welder}，Ladder~\cite{osdi/wang2024ladder}。以 Welder 作为例子，Welder 提出了 Tile-graph 的概念，采取先连接后融合，首先猜测两个相邻的算子是否可以在某个内存层级进行 Tile 重用，随后获得 Tile Shape 检查是否可以减少内存容量。Welder 提出了图连接和子图调度两个算法：
+
+\begin{itemize}
+    \item 图连接算法通过猜测两个相邻的 tile 是否可以被连接，随后按照连接的方式通过自动推断扩展到整个图，最后来计算内存带宽和 footprint 是否符合硬件要求来检查该连接是否成立。
+    \item 图调度通过遍历图中所有出边，并对某个出边进行尝试不同的连接，随后通过 SubGraphTilling 得到几个有效率的 tile 配置然后在硬件中选择最优的一个配置。
+\end{itemize}
+
+然而，基于以上应用在深度学习编译器中的 Tile 技术依然无法表示 FlashAttention，原因在于以上的技术依然局限应用在有向无环图中。而 FlashAttention 的算法设计则打破了有向无环图的限制而开启了硬件感知的处理，以有向无环图的信息密度无法将 FlashAttention 等复杂硬件感知算法进行表达。
+
+\subsection{未来发展趋势}
+
+随着大语言模型的发展，当前的算法设计越来越注重软硬件协同的设计，例如 Mamba-2~\cite{arxiv/dao2024transformers}，Gated Linear Attention~\cite{arxiv/yang2023gated}，RWKV~\cite{arxiv/peng2023rwkv} 等，算法的变化实际上极大影响了深度学习编译器的变化。随着 Triton 编译器的流行，当前编译器软件栈也更加注重硬件可感知与性能而并非通用性。
+
+同时，基于 Tile 的内核融合技术也逐渐替代算子融合技术成为主流，原因在于基于 Tile 的融合技术可以更够在不同的内存层级进行数据复用，减少内存搬运次数和内核启动次数，使得生成的代码效率更高。

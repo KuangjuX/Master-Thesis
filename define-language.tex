@@ -1,0 +1,96 @@
+\renewcommand{\ttdefault}{pcr}
+\lstdefinelanguage{cplus}{
+  keywords={class, union, public, for, if, else, len, elif, struct, template, typename, using, while, do, switch, case, break, continue, return, namespace},
+  keywords=[2]{TensorShape, NumberType, TensorType, FractalTensorType,
+               ElemType, Collections, Number,
+               TypeBase, FractalTensor, Tensor,
+               float32, 
+               int, void, bool, size_t, string, std,
+               unique_ptr, vector, int64_t, char, short, long, float, double, unsigned,
+               KeGemmTraits, G2SLoaderA, GlobalToSharedLoader, S2RLoaderA, SharedToRegLoader,
+               Traits, InType, AccType, RegC},
+  keywords=[3]{const, __global__},
+  keywords=[4]{__copy_async, __syncthreads},
+  keywords=[5]{compute::gemm},
+  identifierstyle=\color{black},
+  sensitive=false,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  stringstyle=\color{dkgreen},
+  morestring=[b]',
+  morestring=[b]",
+  escapeinside={(:}{:)}
+}
+
+\lstdefinelanguage{pp}{
+  keywords={class},
+  keywordstyle=\color{forestgreen}\bfseries,
+  keywords=[2]{apply_to_each,reduce,scan,zip},
+  keywordstyle=[2]\color{blue}\bfseries,
+  keywords=[3]{foreach, emit,for},
+  keywordstyle=[3]\color{tomato}\bfseries,
+  sensitive=false,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{grey}\ttfamily,
+  stringstyle=\color{dkgreen},
+  morestring=[b]',
+  morestring=[b]",
+  escapeinside={(:}{:)}
+}
+
+\definecolor{decorator}{RGB}{105,89,205}
+\definecolor{kw}{RGB}{238,59,59}
+\definecolor{dkblue}{RGB}{0,0,139}
+\lstdefinelanguage{ft}{
+  keywords={FractalTensor, Tensor, FT},
+  keywordstyle=\color{brown}\ttfamily,
+  keywords=[2]{@kaleido, function, ctx},
+  keywordstyle=[2]\color{decorator},
+  keywords=[3]{,def, return, lambda,}\bfseries,
+  keywordstyle=[3]\color{kw},
+  keywords=[4]{,map, foldl, scanl, dilate,}\bfseries,
+  keywordstyle=[4]\color{blue},
+  sensitive=false,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{grey}\ttfamily,
+  stringstyle=\color{dkgreen},
+  morestring=[b]',
+  morestring=[b]",
+  escapeinside={(:}{:)}
+}
+
+% --- 将这个定义放在您的 preamble 或 define-language.tex 文件中 ---
+\definecolor{codeblue}{RGB}{97, 175, 239}    % 类似 React/JS 的蓝色
+\definecolor{codeorange}{RGB}{208, 154, 102}   % 橙色，用于参数
+\definecolor{codeviolet}{RGB}{198, 120, 221}   % 紫色，用于方法
+\definecolor{codegreen}{RGB}{152, 195, 121}   % 绿色，用于字符串
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}      % 灰色，用于注释
+\lstdefinelanguage{AffineDSL}{
+  % Group 1: 类似“类”的构造 (Buffer, Operator, etc.)
+  keywords={Buffer, Operator, SubGraph, AffineMap},
+  keywordstyle=\color{codeblue}\bfseries,
+  % Group 2: 构造函数中的“关键字参数” (inputs, loop, etc.)
+  keywords=[2]{inputs, output, outputs, name, loop, state_vars, nodes, affine_maps},
+  keywordstyle=[2]\color{codeorange},
+  % Group 3: “方法”调用 (codegen)
+  keywords=[3]{codegen},
+  keywordstyle=[3]\color{codeviolet}\bfseries,
+  % 其他设置，模仿 Python 编辑器
+  sensitive=true,
+  comment=[l]{\#},
+  commentstyle=\color{codegray}\itshape, % 注释使用灰色斜体
+  stringstyle=\color{codegreen},         % 字符串使用绿色
+  morestring=[b]",
+  identifierstyle=\color{black},
+}
+% 设置默认的 listings 样式
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    framerule=0.4pt,
+    rulecolor=\color{gray},
+    showstringspaces=false,
+}

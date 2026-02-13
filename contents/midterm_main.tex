@@ -1,0 +1,804 @@
+
+\subsection{研究背景及意义}
+
+深度学习 (Deep Learning) 的发展对各个科学领域产生了深远的影响。
+它不仅在自然语言处理 (NLP) 和计算机视觉 (CV) 等人工智能领域展现出非凡的价值，而且在电子商务、智慧城市和药物研发等更广泛的应用中也取得了巨大成功。
+随着卷积神经网络 (CNN)~\cite{lecun1998cnn}、循环神经网络 (RNN)~\cite{rumelhart1986rnn}、长短期记忆 (LSTM)~\cite{hochreiter1997lstm} 和生成对抗网络 (GAN)~\cite{goodfellow2020gan} 等多功能深度学习模型的出现，简化各种 DL 模型的编程对于实现其广泛应用至关重要。
+随着工业界和学术界的不断努力，为了简化各种深度学习模型的实现，已经提出了几种流行的深度学习框架，例如 TensorFlow~\cite{osdi/abadi2016tensorflow}、PyTorch~\cite{nips/paszke2019pytorch}、MXNet~\cite{arxiv/chen2015mxnet} 等。
+同时，矩阵乘法等独特的计算特性激发了芯片架构师设计定制深度学习加速器的热情，以提高效率。例如 Google TPU、NVIDIA GPU、海思 NPU 等。
+除此之外，为了适应硬件的多样性，将计算有效地映射到深度学习硬件非常重要。
+在通用硬件上，高度优化的线性 алгебра库（例如基本线性 алгебра子程序 (BLAS) 库）（例如 MKL 和 cuBLAS）是深度学习模型高效计算的基础。
+以卷积操作为例，深度学习框架将卷积转换为矩阵乘法，然后调用 BLAS 库中的 GEMM 函数。
+
+为了解决以上问题，深度学习社区提出了使用特定领域的编译器来解决问题。
+很快，工业界和学术界都提出了几种流行的深度学习编译器，例如 TVM~\cite{tvm/chen2018tvm}、XLA~\cite{xla} 等。
+深度学习编译器将深度学习框架中的模型定义作为输入，针对模型规范和硬件架构，模型定义和特定代码实现之间的转换得到了高度优化。
+
+然而，随着大语言模型（LLM）的出现与流行，当前的深度学习算法设计逐渐更加注重于模型与硬件的协同设计。
+例如 Flash Attention~\cite{dao2022flashattention, dao2023flashattention, arxiv/graef2024flash}，Linear Attention~\cite{arxiv/yang2023gated} 等，难以被描述为大型的、规则的线性代数运算。
+当前的深度学习编译器通常使用有向无环图来描述算法，在早期这种表示方法可以用于扩展算法的并行度。
+然而基于有向无环图的表示方法无法对嵌套循环以及硬件信息进行描述，从而对非规则的硬件感知算法的表达与优化带来了限制。
+因此 Triton~\cite{pldi/tillet2019triton} 的出现能够给予 GPU 编程模型允许用户在多个内存层级上进行编程并做自动优化。
+然而 Triton 的编程模型过于耦合 NVIDIA GPU 同时无法基于寄存器进行编程，这也带来了一定的限制。
+
+因此，本研究尝试提出一种能够表达当前硬件感知算法的表示方法并能够针对特定的硬件进行优化，最终生成有效率的硬件代码，这在当今的时代有着重要意义。
+
+\subsection{研究现状及问题}
+
+本文经过详尽的调研，发现当前工业界与学术界的深度学习编译器大致分为三类。
+一类是以 TVM~\cite{tvm/chen2018tvm}，XLA~\cite{xla} 为代表的以 DAG 作为前端表示的深度学习编译器；一类是以 Tiramisu~\cite{cgo/baghdadi2019tiramisu} 为代表的基于多面体模型的深度学习编译器；一类是以 Triton~\cite{pldi/tillet2019triton} 为代表的硬件感知的深度学习编译器。
+下面将对这 HUOBI类型进行详细的介绍。
+
+\subsubsection{基于 DAG 的深度学习编译器}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/tvm.png}
+    \caption{TVM 深度学习编译器架构~\cite{tvm/chen2018tvm}}
+    \label{figure:tvm}
+\end{figure}
+
+基于DAG的中间表示是编译器构建计算图的最传统方式之一，其节点和边以有向无环图（DAG）的形式组织。
+在深度学习编译器中，DAG 的节点代表原子深度学习操作（如卷积、池化等），边则代表张量。
+该图是无环的，没有循环，这与通用编译器的数据依赖图（DDG）有所不同。
+借助 DAG 计算图，深度学习编译器可以分析各种操作之间的关系和依赖性，并利用这些信息指导优化。
+已经有许多针对DDG的优化技术，例如公共子表达式消除（CSE）和死代码消除（DCE）。
+目前以 DAG 作为前端表示的深度学习编译器与框架有 TVM~\cite{tvm/chen2018tvm}，XLA~\cite{xla}，Pytorch~\cite{nips/paszke2019pytorch} 等。
+
+TVM~\cite{tvm/chen2018tvm} 是当前最流行的端到端的以 DAG 作为前端表示的深度学习编译器。
+在 TVM 中采用低级循环程序合成技术对性能进行微调，采用类似爱因斯坦求和的张量表达语言来详细说明张量运算符如何执行数值运算~\cite{tvm/lai2023relax, tvm/roesch2018relay}。
+TVM 的整体系统架构如图 ~\ref{figure:tvm} 所示。
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Ansor.png}
+    \caption{Ansor 系统设计~\cite{tvm/zheng2020ansor}}
+    \label{figure:Ansor}
+\end{figure}
+
+在 TVM 中引入了基于搜索的自动调优方法，AutoTVM~\cite{nips/chen2018learning} 可以通过事先编写模版来组成调度的搜索空间，然而这对模版的编写带来了很高的要求。
+Ansor~\cite{tvm/zheng2020ansor} 更进一步可以自动生成一个覆盖全面的优化搜索空间并为每个张量程序提供被选择的机会，同时通过 Auto-tunning 得到性能最好的模版，Ansor 的系统架构如图~\ref{figure:Ansor}。
+尽管这种方法对于用户来说很容易使用，但编译器的自动调度可能会导致高复杂性，张量表达式在内部很快被转换为循环表达，导致抽象很快丢失。
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/BOLT.png}
+    \caption{BOLT 系统设计~\cite{tvm/xing2022bolt}}
+    \label{figure:BOLT}
+\end{figure}
+
+然而自动调优技术无法对于硬件进行感知，只能优化代码在通用计算核心运行，通常无法发挥出硬件的最大潜力，从而导致性能不佳。
+为了解决自动调优对于硬件感知不够的问题，TVM 尝试引入具有临时语义的算子与硬件模版库。
+例如 BOLT 通过使用 CUTLASS~\cite{CUTLASS} 手写融合矩阵乘及卷积算法，在共享内存以及寄存器内存中进行数据复用，从而减少算子间加载和存储内存的次数，减少内核启动的消耗以及扩大优化范围以探索更多指令调度。
+BOLT 的系统设计如图~\ref{figure:BOLT}所示。
+
+然而，基于临时语义的解决方案很难应对不断发展的 DNN 算法，并且基于临时语义的解决方案也可能破环整体软件栈的概念性，使得其变得极为臃肿与复杂。
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/AMOS.png}
+    \caption{AMOS 系统设计~\cite{isca/zheng2022amos}}
+    \label{figure:AMOS}
+\end{figure}
+
+AMOS~\cite{isca/zheng2022amos} 中提出了一种更加通用的 IR 来充分利用硬件特性，如图\ref{figure:AMOS}所示。
+AMOS 将计算加速器从软件到硬件的映射方式分为硬件感知和指令集感知。
+硬件感知知晓硬件架构的细节信息，比如 PE 数量，PE 间互联方式，这样软硬件映射过程可以转化为一个在给定硬件约束下的优化问题；指令集感知是映射过程对于硬件架构无感知，只根据对外暴露的指令集进行软硬件映射。
+
+AMOS 通过引入的新的 IR，进一步提出了计算、内存抽象，输入是由 Python 编写的高层次代码和基于计算和方寸抽象出的硬件指令，然后生成不同的映射组合，一个映射组合由计算映射和访问映射组成。
+计算映射是将算子转换为计算指令映射到加速器上；访存映射通过访存指令描述数据的访问和存储行为。
+AMOS 的映射过程分为两个阶段，第一阶段将循环迭代映射到虚拟加速器上，第二阶段加入硬件资源和指令集限制，调整映射过程并将其映射到真实的物理加速器上。
+
+尽管 AMOS 在很大程度上引入了编译器对于硬件的感知，但是在 DSL 层面没有引入硬件特性，基于分析的优化方法依然无法完全发挥出硬件的性能。
+同时将 AMOS 引入 TVM 等端到端的深度学习编译器依然是一个 ad-hoc 的方法，尽管这可能在某些领域有效但在某些方面可能会失去效果甚至变得更差，同时也会破坏开源软件栈的一致性。
+
+\subsubsection{基于多面体模型的深度学习编译器}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/Tiramisu.png}
+    \caption{Tiramisu 系统设计~\cite{cgo/baghdadi2019tiramisu}}
+    \label{figure:Tiramisu}
+\end{figure}
+
+与基于 DAG 的深度学习编译器不同，基于 Polyhedral 的深度学习编译器使用线性规划、放身边换和其他数学方法来优化具有边界和分支静态控制流的基于循环的代码~\cite{TPDS/li2020deep}。
+与 DAG-based IR 相比，多面体模型中内存引用和循环嵌套的边界可以是具有任意形状的多面体。
+这种灵活性使多面体模型在通用编译器中得到广泛应用。
+一些流行的深度学习编译器例如 Tiramisu~\cite{cgo/baghdadi2019tiramisu}，AKG~\cite{pldi/zhao2021akg}，FreeTensor~\cite{pldi/tang2022freetensor} 等都采用了多面体模型。
+基于多面体模型的优势在于可以可以基于多面体 IR 轻松应用各种多面体变换，例如融合、平铺、下沉和映射，包括设备相关和设备无关的优化。
+除此之外也可以复用许多多面体的后端工具链，例如 isl~\cite{verdoolaege2010isl}，Omega~\cite{Blaschek1994}，PIP~\cite{pip}，PolyLib~\cite{loechner1999polylib}。
+然而，尽管基于多面体的编译器非常灵活，但这种灵活也阻碍了与调优机制的集成，同时也很难对硬件信息有强烈的感知。
+
+Tiramisu~\cite{cgo/baghdadi2019tiramisu} 是其中比较有代表性的基于多面体模型编译器，系统设计如图 ~\ref{figure:Tiramisu} 所示。
+Tiramisu 设计了四级 IR，分为算法层，通信层，数据格式层和代码转换层。
+Tiramisu 提供了一种基于循环表达式的调度语言用来表达算法，同时提供了一些高级调度命令，用于常见的优化，例如 Loop Tilling, Splitting, Shifting 等。
+随后 Tiramisu 在多层 IR 的优化下被编译到具体的硬件代码。
+Tiramisu 支持多种硬件的代码生成，例如 CUDA，CPU，FPGA 以及分布式系统等架构。
+
+然而，尽管 Tiramisu 在通用性上十分优秀，并且可以基于开源的多面体工具链进行分析与优化。
+然而，基于多面体模型的调度语言很难去考虑CRETE的硬件信息；同时，由于现代体系结构不同的分块策略对于性能的影响非常大，基于多面体模型的编译器对于分块策略以及自动调优的支持不是很好，导致其生成的代码质量较为一般。
+
+\subsubsection{硬件感知的深度学习编译器}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/triton-kernel-compilation-stages.jpg}
+    \caption{Triton Kernel 编译流程~\cite{pldi/tillet2019triton}}
+    \label{figure:triton}
+\end{figure}
+
+相较于 DAG-based 的编译器以及 polyhedral-based 的编译器，以 Triton~\cite{pldi/tillet2019triton} 为代表的深度学习编译器更加关注于对于具体硬件的感知与适配。
+Triton 在 DSL 中引入了 load, store, dot, swizzle2d 等运算符，这些运算符都是以 NVIDIA GPU 为核心进行设计的，具有很强的硬件感知能力，能够非常高效地生成 CUDA 代码。
+
+当前 Triton 基于 MLIR~\cite{cgo/lattner2021mlir} 进行构建。
+MLIR 收到 LLVM 的高度影响，是一种比 LLVM 更纯粹的编译器基础设施。
+MLIR 重用许多 LLVM 中的思想和接口，位于模型表示和代码生成之间。
+MLIR 具有灵活的类型系统，允许多个抽象层次，并引入了方言(dialects)来表示多个抽象层次。
+每个方言由一组定义的不可变操作组成。
+MLIR 支持方言间的灵活转换，此外，MLIR 还可以创建新的方言，以连接到新的底层编译器，为硬件开发者和编译器研究人员铺平了道路。
+
+Triton Kernel 编译流程如图 ~\ref{figure:triton} 所示，Triton 自定义了 TTIR(Trition Tensor Intermediate Representation)、TTGIR(Triton GPU Intermediate Representation) 以及 TTLLIR(Triton Low-Level Intermediate Representation)，分别对应从张量映射到 GPU 执行模型再到底层表示，最后被编译到 LLVM IR 并生成 PTX。
+Triton 也提供了 JIT 编译，能够根据用户配置的分块策略进行自动调度并筛选出最好的分块策略。
+
+Triton 用户可以在 GPU 共享内存上进行编程并制定分块策略，这无异于极大提高了用户的可编程性并能充分发挥硬件性能，同时 Triton 也对 Auto Tunning 有较好的支持，能够筛选出最好的分块策略。
+然而，Triton 的局限性在于仍然无法在寄存器内存进行编程，因此无法在寄存器内存进行数据复用。
+同时也对算法描述进行了一定的限制。
+
+
+\subsubsection{基于分块的内核融合技术}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/DeFiNes.png}
+    \caption{不同融合技术~\cite{hpca/mei2023defines}}
+    \label{figure:DeFiNES}
+\end{figure}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/FlashAttention.png}
+    \caption{FlashAttention-v2 算法流程~\cite{dao2023flashattention}}
+    \label{figure:FlashAttention}
+\end{figure}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Welder.png}
+    \caption{Welder 系统设计~\cite{osdi/shi2023welder}}
+    \label{figure:Welder}
+\end{figure}
+
+当前内核融合技术逐渐从算子融合、层融合逐渐转向了以 Tile 融合，在 DeFiNES~\cite{hpca/mei2023defines} 中展示了当前融合技术的变化，如图~\ref{figure:DeFiNES} 所示。
+原因在于基于 Tile 的融合方式相比算子融合与层融合能够更大程度对内存进行复用，减少内存搬入搬出次数；同时基于 Tile 进行切分也更有利于对不同块并行化，极大地加速了内核执行性能。
+FlashAttention-v2 是其中最具知名度的基于 Tile 进行融合的例子，FlashAttention-v2 的算法设计如图 ~\ref{figure:FlashAttention}。
+FlashAttention-v2 通过 Tile 的融合技术将矩阵 Q, K, V 进行切分并不断加载到共享内存中并再次切块加载入寄存器内存中，随后执行 mma 计算并进行 renorm。
+FlashAttention-v2 相比于传统的多头 Attention 具有极大的性能优势，增加了内存复用与并行度，减少了内存压力。
+
+当前也有一些基于 Tile 进行融合的技术被运用在深度学习编译器中，例如 Roller~\cite{osdi/zhu2022roller}，Welder~\cite{osdi/shi2023welder}，Ladder~\cite{osdi/wang2024ladder}。
+以 Welder 作为例子，Welder 提出了 Tile-graph 的概念，采取先连接后融合，首先猜测两个相邻的算子是否可以在某个内存层级进行 Tile 重用，随后获得 Tile Shape 检查是否可以减少内存容量。
+Welder 提出了图连接和子图调度两个算法：
+
+\begin{itemize}
+    \item 图连接算法通过猜测两个相邻的 tile 是否可以被连接，随后按照连接的方式通过自动推断扩展到整个图，最后来计算内存带宽和 footprint 是否符合硬件要求来检查该连接是否成立。
+    \item 图调度通过遍历图中所有出边，并对某个出边进行尝试不同的连接，随后通过 SubGraphTilling 得到几个有效率的 tile 配置然后在硬件中选择最优的一个配置。
+\end{itemize}
+
+然而，基于以上应用在深度学习编译器中的 Tile 技术依然无法表示 FlashAttention，原因在于以上的技术依然局限应用在有向无环图中。
+而 FlashAttention 的算法设计则打破了有向无环图的限制而开启了硬件感知的处理，以有向无环图的信息密度无法将 FlashAttention 等复杂硬件感知算法进行表达。
+
+\subsubsection{存在的问题}
+
+综上所述，尽管现有的深度学习编译器在不同方面取得了显著进展，但仍然存在以下挑战：
+
+\begin{enumerate}
+    \item \textbf{对于硬件感知算法的表达能力不足。}
+    以 TVM 为代表的基于 DAG 的编译器提供了粗粒度的、硬件无关的抽象。
+    这种抽象虽然通用，但隐藏了硬件细节，导致其难以高效地表达和优化如 FlashAttention 等需要精细控制内存层级和并行执行的硬件感知算法。
+    它们无法对寄存器复用、共享内存管理以及线程束级操作等进行有效优化。
+    \item \textbf{在特定硬件上的优化不够充分。}
+    以 Tiramisu 为代表的基于多面体模型的编译器虽然在循环变换方面表现强大，但缺乏对 GPU 等特定硬件（如线程束、张量核心）的原生抽象，导致代码生成质量不佳。
+    同时，其调度语言难以融合具体的硬件信息，对分块策略和自动调优的支持也相对有限。
+    以 Triton 为代表的硬件感知编译器虽然能生成高效的硬件代码，但其设计与特定硬件（如 NVIDIA GPU）高度耦合，限制了可移植性，并且其以内核为中心的设计限制了跨内核的优化机会。
+    \item \textbf{现有内核融合技术仍受限于表示能力。}
+    当前先进的基于分块（Tile-based）的内核融合技术（如 Welder）虽然被尝试应用在深度学习编译器中，但它们大多构建于原有的 DAG 表示之上。
+    DAG 本身的局限性使其无法捕捉 FlashAttention 这类复杂算法所需的嵌套循环结构和精细的内存层级信息，从而无法充分发挥硬件的全部潜力。
+\end{enumerate}
+
+这些问题限制了当前深度学习编译器在高性能计算场景下的应用，也是本研究致力于解决的核心问题。
+
+
+\subsection{研究内容及目标}
+
+\begin{figure}%[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/abstract.pdf}
+    \caption{本研究系统总体路线}
+    \label{figure:abstract}
+\end{figure}
+
+为了克服当前深度学习编译器对于硬件感知算法表达困难以及难以进行硬件相关优化的挑战，本研究希望能够提出一种硬件可感知的抽象。
+在这层抽象上会尽可能暴露出性能有关的信息，这要起用户去基于特定硬件进行编程。
+随后这层抽象将被被分析最后生成硬件上有效率的代码。
+本研究的目标希望是通过以上抽象所映射出的硬件代码能够比当前深度学习编译器所生成出的代码性能更好。
+
+本研究的总体路线如图 ~\ref{figure:abstract} 所示。
+在最上层基于本研究提供的数据流图 API 使用调度中间表示进行描述，随后进行数据流图构建。
+本研究提出了 AffineGraph 用于表示携带嵌套循环信息的数据流图，随后数据流图进行图降低（Graph Lower）将其转换为携带硬件内存信息的数据流图。
+随后对图中的不同层级内存进行切块以增大数据重用和减少内存拷贝操作，最终针对具体硬件进行硬件映射与代码生成。
+因此，本文的研究内容主要涉及三个方面，即：
+
+\begin{itemize}
+    \item 基于多内存层级数据流图的硬件感知抽象
+    \item 基于分块策略的内核融合
+    \item 高效的内核映射策略
+\end{itemize}
+
+\subsubsection{基于多内存层级数据流图的抽象}
+
+当前，以 DAG 为基础的深度学习编译器出现的契机在于不断迭代的新模型架构的出现，例如 CNN~\cite{lecun1998cnn}，RNN~\cite{rumelhart1986rnn}，LSTM~\cite{hochreiter1997lstm} 以及 GAN~\cite{goodfellow2020gan} 等。
+然而随着大语言模型的流行，当前的模型逐渐收敛到以 Transformer~\cite{nips/vaswani2017attention} 为核心的算法设计。
+当前的算法设计更加注重于硬件感知度以及算法-硬件协同设计。
+然而，基于 DAG 粗粒度的表示方法难以对这类算法进行描述。
+因此需要一种合适粒度的抽象来对硬件感知算法进行描述，同时，基于 DAG 的描述方法也无法对硬件性能通过软件的分析方法挖掘到极致。
+本课题的一个研究目标为设计一套抽象来对这种算法进行描述。
+
+\textbf{预期目标：} 设计一个基于多内存层级数据流图的抽象，能够准确表达出硬件感知性算法并便于进行进一步的优化。
+
+\subsubsection{基于分块策略的内核融合策略}
+
+当前内核融合技术逐渐从基于算子的融合技术走向了基于 Tile 的融合技术。
+其中 FlashAttention-v2~\cite{dao2023flashattention} 是一个在学术界和工业界都十分成功的例子。
+FlashAttention-v2 通过 Tile 的融合技术将矩阵 Q, K, V 进行切分并不断加载到共享内存中并再次切块加载入寄存器内存中，随后执行在 Tensor Core 上的矩阵乘计算计算并进行归一化。
+FlashAttention-v2 相比于传统的多头 Attention 具有极大的性能优势，增加了内存复用与并行度，减少了内存压力。
+更进一步，FlashDecoding 通过将 K，V 进行进一步的切分并将其派发到不同的 block 中进行运行更进一步提高了并行度并可以将其运行在推理中。
+除此之外，基于分块策略的内核融合技术也在其他算法中被应用，例如，FlashFFTConv~\cite{arxiv/fu2023flashfftconv} 探讨了如何基于分块融合对长卷积进行优化。
+FlashNorm~\cite{arxiv/graef2024flash} 则探讨了如何对 RMSNorm 基于分块融合进行优化。
+
+然而，基于 Tile 的内核融合技术在深度学习编译器中的应用仍然不是很多。
+尽管 Roller~\cite{osdi/zhu2022roller}，Welder~\cite{osdi/shi2023welder}，PIT~\cite{sosp/zheng2023pit} 针对基于 Tile 的内核融合技术给出了一些尝试，然而它们依然是在基于 DAG 的编译器例如 TVM~\cite{tvm/chen2018tvm} 中进行讨论与实现。
+然而由于 DAG 自身的局限性，基于 DAG 的 tilling 并没有办法去发挥所有硬件潜能。
+
+因此，本课题的一个研究目标在于如何基于硬件感知的情况下进一步通过分块策略进行内核融合并进一步挖掘硬件性能。
+
+\textbf{预期目标：} 将基于 Tile 的内核融合技术应用在多存层级的数据流图上进行优化，使得能够具有更多的内存复用以及挖掘出最大并行度。
+
+\subsubsection{高效的内核映射策略}
+
+当前的深度学习编译器通常将后端代码生成映射到硬件库（例如 CuBLAS, CuDNN~\cite{chetlur2014cudnn} 等）或者是基于手写的 CUDA Kernel 并在自动调优的协同下去自动生成。
+然而硬件厂商库尽管在单算子上具有较好的性能，但是由于是黑盒，因此无法处理内核融合的问题；而基于手写与自动调优的 CUDA Kernel 则在一些情况下很难与优化的非常好的硬件厂商库的性能进行抗衡。
+
+尽管 CUTLASS~\cite{CUTLASS} 提供了一个基于模版的编程框架，将一系列内核组件进行拆分，提供了 TiledMMA，TiledCopy，MMAAtom 等抽象。
+然而，CUTLASS 过于极致的模版技术的运用以及非常灵活的抽象设计导致了编译器难以基于 CUTLASS 做分析及做代码生成。
+
+ThunderKittens~\cite{arxiv/spector2024thunderkittens} 提供了一个合适的抽象粒度，它以线程束作为一个基准线，在线程束下的实现部分作为黑盒实现，在线程束之上作为白盒可以由用户进行设计。
+然而，ThunderKittens 的限制在于它仅仅针对 H100 做了优化并且无法给予不同切块策略进行自动调优。
+同时，由于 NVIDIA 硬件的高度复杂性，用户也很难针对自己的需求对 ThunderKittens 针对特定硬件进行优化与修改。
+
+因此，本课题希望设计一套具有合适粒度抽象以及能够支持性能调优的代码生成方案。
+
+\textbf{预期目标：} 基于 Tile 内核融合的中间表示设计一套具有合适粒度抽象以及能够支持性能调优的代码生成方案并进行有效率的代码生成。
+生成的代码性能能够比当前主流的深度学习编译器要更好。
+
+
+\subsection{已取得阶段性成果}
+
+本课题基于对大语言模型的观察以及现有编译器框架的局限性设计了 AffineGraph。
+它是一种新型编译器框架，引入了分层、硬件感知的中间表示（IR）以及用于自动化基于分块融合和代码生成的优化流水线。
+本设计的关键洞察在于深度学习工作负载需要对内存层次结构转换和计算模式进行精确建模，而现有的编译器无法有效地捕获这些内容。
+AffineGraoh 通过三段流水线弥合了高级算法描述和硬件优化 CUDA 代码之间的差距：
+
+\begin{itemize}
+    \item \textbf{分层仿射图的构建： } 本课题引入了一种新颖的多级数据流图表示方法，该方法通过仿射变换显示地捕获内存层级结构转换和嵌套循环结构。这种表示方法能够精确地对硬件感知算法进行建模，其中跨内存层级的数据移动决定了算法的性能。
+    \item \textbf{硬件感知图变换： } 本课题基于 GPU 微架构参数自动应用架构特定优化（例如：分块，融合）。与依赖手动调优或黑盒优化的现有方法不同，AffineGraph 的变换阶段利用中间表示中显式的内存层级结构信息来做出明智的优化决策。
+    \item \textbf{基于微任务的代码生成： } 本课题开发了一种新型代码生成策略，该策略将优化的 DFG 子树映射到 \textit{Warp-level} 执行单元，并实现精确的 \textit{CUDA} 代码生成。这种方法能够高效利用专用硬件单元，同时保持跨不同 GPU 架构的可移植性。
+\end{itemize}
+
+\subsubsection{基于数据流的 Affine IR 设计}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/affinegraph-abstraction.pdf}
+    \caption{AffineGraph IR 的抽象设计}
+    \label{figure:affinegraph-abstraction}
+\end{figure}
+
+AffineGraph IR 是本课题设计的机遇数据流的 IR，同时也是编译器框架的基石，旨在解决现有 IR 在表达硬件感知算法方面的局限性。
+图~\ref{figure:affinegraph-abstraction} 展示了本课题 IR 设计的关键组件。
+AffineGraph IR 的核心在于引入了一种层次化表示，它将数据流图与显式内存访问模式相结合。
+该 IR 由三种主要节点类型（缓冲区节点、运算符节点和子图节点）组成，这些节点通过仿射边连接，仿射边通过仿射映射编码精确的内存访问模式。
+这种设计能够在保持高级算法抽象的同时，直接对硬件特定特性进行建模。
+与传统的基于 DAG 或多面体的表示（它们抽象掉了硬件细节）不同，AffineGraph IR 为内存层次结构、嵌套并行性和仿射变换提供了显式抽象。
+通过精确建模硬件特定特性（例如 \textit{Bank Conflicts} 和专用计算单元），可以对现代 NVIDIA GPU 进行精细化优化。
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/affine_flash_attention.pdf}
+    \caption{AffineGraph IR 对 FlashAttention-2 的表示}
+    \label{figure:affinegraph-flashattention}
+\end{figure}
+
+为了展示 AffineGraph IR 的表达能力和优化能力，本课题以 FlashAttention-2 为例进行说明。
+图~\ref{figure:affinegraph-flashattention} 展示了 AffineGraph IR 如何自然地捕捉 FlashAttention-2 的关键优化，包括 Q、K、V 矩阵的分层平铺、内存层次结构转换和嵌套并行性。
+IR 的结构化表示能够自动优化复杂的内存访问模式和计算依赖关系，而这些通常在现有框架中需要手动处理。
+
+\textbf{缓冲区节点：} 缓冲区节点表示特定硬件内存层次结构级别的连续内存区域。
+每个缓冲区都带有数据类型、形状、内存空间和别名关系等注释。
+与将内存视为不透明张量的基于 DAG 的表示不同，缓冲区节点编码了特定于硬件的内存特性。
+例如，NVIDIA GPU 中的共享内存缓冲区通过 Swizzle Layout 来解决 Bank Conflicts 问题。
+
+\textbf{运算符节点：} 运算符节点描述作用于缓冲区节点的计算操作，表示硬件感知的计算单元（例如,Tensor Core MMA, Warp level reduction）。
+该节点由指令级约束参数化，例如 MMA 的矩阵形状、并行维度（包括线程/线程束/块映射）以及数据重用机会。
+这种粒度使得可以直接映射到硬件原语，同时保持优化灵活性。
+
+\textbf{子图节点：} 子图节点代表嵌套的并行计算单元，这些单元封装了具有仿射边界的循环嵌套、具有明确图块形状和迭代顺序的分块策略，以及定义缓冲区如何在层次结构级别之间移动的内存提升规则。
+一个子图节点递归地包含缓冲区、运算符和子图节点的子图，从而实现层次优化。
+例如，一个 GEMM 子图节点可能包含用于将图块从全局内存加载到共享内存、将图块从共享内存加载到寄存器以及后续寄存器级 MMA 操作的子块。
+
+\textbf{仿射边：} 仿射边连接不同的节点，并编码内存缓冲区之间的数据依赖关系，如图 3(a) 所示。
+它承载仿射映射，用于描述数据如何在内存层级之间传输。
+仿射边的源缓冲区节点和目标缓冲区节点都标注了其层级，从而可以将仿射边映射到不同的硬件操作。
+例如，共享内存和寄存器内存之间的数据移动——无论是加载还是存储——由于不同的同步要求和指令流水线，必须映射到不同的硬件操作。
+缓冲区、运算符和子图节点被封装成一个统一的抽象概念，如图 3(c) 所示。
+
+\textbf{仿射映射：} 仿射映射是形式化定义内存访问模式的数的核心，它描述了从 \(m\) 维逻辑迭代空间到 \(n\) 为数据坐标空间的映射。
+形式上，仿射映射 \(M\) 是一个函数 \(\mathcal{M}: \mathbb{Z}^m \to \mathbb{Z}^n\)，由迭代域 \(\mathcal{D} \subseteq \mathbb{Z}^m\) 定义，该映射表示为：
+
+\[ \mathcal{M}(\vec{i}) = \mathbf{A}\vec{i} + \vec{n}, \quad \forall \vec{i} \in \mathcal{D}\]
+
+其中：
+
+\begin{itemize}
+    \item \(\vec{i}\) 是一个 \(m\) 维度整数向量用于表示迭代向量。
+    \item \(\mathbf{A} \in \mathbb{Z}^{n \times m}\) 是一个整数矩阵，用来表示变换的线性部分。
+    \item \(\vec{b} \in \mathbb{Z}^n\) 是一个整数向量，表达常数偏移。
+    \item \(\mathcal{D}\) 是一个迭代域， 通常是一个 Z-Polyhedron，由一组仿射不等式定义 \(\mathbf{D}\vec{i} + \vec{d} \ge \vec{0}\)。
+\end{itemize}
+
+这种结构能够精确且可分析地表达复杂的访问模式，例如分块，步长和交错访问。
+
+为了将这种形式化方法应用于实际示例，考虑一个典型的 GEMM 操作 \(C_{ij} = \sum_k A_{ik}b_{kj}\)，其内存布局为行优先。
+迭代域为 \(\mathcal{D} = \{ (i, j, k)^T \mid 0 \le i < M, 0 \le j < N, 0 \le k < K\}\)。
+
+对形状为 \(A[i, k]\) 的二维矩阵 \(A\) 形状为 \(M \times K\) 可以描述为从迭代空间 \(\mathbb{Z}^2\) (迭代向量 \(\vec{i}_A = (i, k)^T\)) 到一维内存地址的映射 \(\mathbb{Z}^1\)。
+对于行优先布局，地址计算为 \(\text{offset} = i \cdot K + k\).
+这种线性地址计算可以完美使用本课题的仿射定义来描述：
+\[ \text{addr}(\vec{i}_A) = \begin{bmatrix} K & 1 \end{bmatrix} \begin{bmatrix} i \\ k \end{bmatrix} + [\text{base\_addr}_A] \]， 这里，仿射映射由 \(\mathbf{A} = \begin{bmatrix} K & 1
+\end{bmatrix}\) 和 \(\vec{b} = [\text{base\_addr}_A]\) 定义。
+这个例子展示了形式化的矩阵向量表示法如何简洁地建模具体的底层内存访问模式，从而使编译器能够分析和转换这些模式。
+
+\paragraph{控制流与谓词执行}
+
+静态数据流图面临的一个关键挑战是处理动态控制流（例如在 Masked Attention 中的情况）。
+AffineGraph 通过谓词执行（Predication）来解决这个问题，即操作根据运行时的掩码（mask）来条件性地执行。
+本课题通过为节点和边增加一个可选的谓词（Predicate）来实现这一点，而不是引入会破坏数据流结构的显式控制流节点。
+
+本课题将\textbf{谓词（Predicate）}形式化地定义为一个元组 \(P = (B_{\text{pred}}, \mathcal{A}_{\text{pred}})\)，其中：
+\begin{itemize}
+    \item \(B_{\text{pred}}\) 是一个指向\textbf{缓冲区节点}的引用，该节点包含布尔值（或整数 0/1），代表条件掩码。
+    \item \(\mathcal{A}_{\text{pred}}\) 是一个\textbf{仿射映射}，它将来自迭代域 \(\mathcal{D}\) 的当前迭代变量 \(\vec{i}\) 映射到 \(B_{\text{pred}}\) 内的一个地址。
+\end{itemize}
+
+这个谓词 \(P\) 可以附加到数据移动的边和计算节点上：
+
+\textbf{带谓词的仿射边：} 一个定义了从源缓冲区 \(B_{\text{src}}\) 到目标缓冲区 \(B_{\text{dest}}\) 数据传输的\textbf{仿射边}，可以由谓词 \(P\) 限定。对于给定的迭代 \(\vec{i} \in \mathcal{D}\)，仅当条件 \(B_{\text{pred}}[\mathcal{A}_{\text{pred}}(\vec{i})] = \text{true}\) 满足时，数据传输才会被执行。
+
+\textbf{带谓词的算子节点：} 类似地，一个\textbf{算子节点}也可以由谓词 \(P\) 限定。对于迭代 \(\vec{i} \in \mathcal{D}\)，仅当 \(B_{\text{pred}}[\mathcal{A}_{\text{pred}}(\vec{i})] = \text{true}\) 时，该算子定义的计算才会被执行。
+
+例如，在 Masked Self-Attention 机制中，Query 和 Key 矩阵的乘法可以被实现为一个带谓词的\textbf{算子节点}。
+在这里，\(B_{\text{pred}}\) 就是注意力掩码张量（例如，一个上三角布尔矩阵）。
+对于输出的注意力得分矩阵的每个元素 \((i, j)\)，映射 \(\mathcal{A}_{\text{pred}}\) 会访问掩码中对应的 \((i, j)\) 元素。
+代码生成器随后会生成相应的代码，只有当获取的掩码值为真时，才执行乘加操作。
+
+这种设计使得 AffineGraph 能够在保持其静态、可分析的数据流结构的同时，优雅地融入动态的、依赖数据的控制流，使其足以表达复杂的现代算法。
+
+\subsubsection{图降低与代码生成}
+
+图降低（Graph Lowering）阶段将优化后的 AffineGraph IR 转换为可执行代码。
+该过程通过对图的节点进行拓扑排序，并对排序后的每个节点递归调用代码生成函数，从而系统地将声明式的图表示转换为命令式的嵌套循环和硬件特定指令序列。
+
+\begin{algorithm}[H]
+\caption{AffineGraph 代码生成算法}
+\label{alg:codegen}
+\begin{algorithmic}[1]
+\Procedure{Gen}{N}
+    \If{\(N\) is predicated by \(P=(B_{\text{pred}}, \mathcal{A}_{\text{pred}})\)}
+        \State Emit("if (\(B_{\text{pred}}[\mathcal{A}_{\text{pred}}(\vec{i})]\)) \{")
+    \EndIf
+
+    \If{\(N\) is a \textbf{SubGraph} with domain \(\mathcal{D}_N\)}
+        \State Emit("for \(\vec{i} \in \mathcal{D}_N\) \{")
+        \ForAll{child \(C\) in TopologicalSort(\(N\).children)}
+            \Call{Gen}($C$) }
+        \EndFor
+        \State Emit("\}")
+    \ElsIf{\(N\) is an \textbf{Operator}}
+        \ForAll{edge \(E\) in \(N\).incoming\_edges}
+            \State Emit(InstructionForLoad(\(E\)))
+        \EndFor
+        \State Emit(InstructionForSync(\(N\)))
+        \State Emit(InstructionForCompute(\(N\)))
+    \EndIf
+
+    \If{\(N\) is predicated}
+        \State Emit("\}")
+    \EndIf
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+代码生成的核心是一个递归过程 \textsc{Gen}，如算法~\ref{alg:codegen}所示。
+它根据节点类型（\(N\)）来生成相应的代码。
+当遇到一个子图节点（SubGraph）时，它会生成循环头，然后递归调用自身来生成循环体。
+关键逻辑在于处理算子节点（Operator）。
+算法首先为其所有传入的数据依赖（边）生成相应的数据加载指令（例如，针对不同内存层级的 \textit{cp.async} 或 \textit{ld.matrix} 指令）。
+在所有加载指令发出后，它会生成一个同步指令（如 \textit{barrier}）来等待异步操作完成，最后才生成算子的计算指令。
+这种形式化的递归定义，使得从层级化的图表示到结构化的高性能代码的转换过程清晰而系统。
+
+\subsubsection{硬件感知优化}
+
+AffineGraph 的有效性源于其执行硬件感知优化的能力。
+这主要通过一个复杂的硬件映射过程来实现，该过程确定了分块策略和内存访问模式。
+
+\paragraph{分块大小与并行度确定}
+% 一个关键的变换是分块（Tiling）。
+% 分块大小和并行粒度（例如线程块和线程束配置）的确定，是结合硬件参数和启发式模型来指导的。
+% 以 NVIDIA A100 GPU 为例，本课题的方法会考虑：
+% \begin{itemize}
+%     \item \textbf{Tensor Core 形状：} 原生 MMA 指令的形状（例如 FP16 的 16x8x16）极大地影响了 Warp 级分块大小的选择。
+%     \item \textbf{内存限制：} 每个流式多处理器（SM）可用的共享内存和寄存器文件容量限制了线程块级的分块大小。
+%     \item \textbf{占用率（Occupancy）：} 通过启发式方法来选择一个能够最大化理论占用率的配置，平衡资源使用（寄存器、共享内存）和活跃线程块的数量。
+% \end{itemize}
+
+一个关键的变换是分块（Tiling）。
+分块大小和并行粒度（例如线程块和线程束配置）的确定，是结合硬件参数和解析式代价模型（Cost Model）来指导的。
+为了在巨大的搜索空间中高效地寻找到最优的配置参数，本研究构建了一个综合考虑计算能力、内存带宽、SRAM 与寄存器容量限制以及流水线效率的代价模型。
+
+\paragraph{符号定义}
+首先定义硬件参数集合 $H$ 与决策变量集合 $\Theta$。
+硬件参数 $H$ 包括：理论峰值计算能力 $P_{peak}$ (TFLOPS)，HBM 全局内存带宽 $\beta_{mem}$ (GB/s)，每 SM 的共享内存容量 $C_{SRAM}$ 和寄存器文件容量 $C_{Reg}$，L2 Cache 容量 $C_{L2}$ 等。
+决策变量 $\theta \in \Theta$ 包括：矩阵乘法的分块大小 $B_m, B_n, B_k$，软件流水线级数 $K_{stage}$，以及每线程块的 线程束数量 $N_{warp}$。
+
+\paragraph{约束模型}
+只有满足硬件资源限制的配置 $\theta$ 才是可行解。
+占用率 $O_{active}$ 定义为每个 SM 上能同时活跃的线程块数量，计算公式如下：
+
+\begin{equation}
+    O_{active}(\theta) = \min(O_{SRAM}, O_{Reg}, O_{Thread})
+\end{equation}
+
+其中 $O_{SRAM} = \lfloor \frac{C_{SRAM}}{U_{SRAM}} \rfloor$，$U_{SRAM}$ 为多级缓冲所需的共享内存用量，由 $K_{stage}$ 和分块大小决定；
+$O_{Reg} = \lfloor \frac{C_{Reg}}{U_{Reg}} \rfloor$，$U_{Reg}$ 为累加器和临时变量所需的寄存器用量；
+$O_{Thread}$ 为线程数限制。
+可行性约束要求 $O_{active}(\theta) \ge 1$。
+
+\paragraph{性能模型}
+优化的目标是最小化总执行时间 $T_{total}$。
+计算时间由 $T_{comp} = \frac{\textbf{Total FLOPs}}{P_{peak}}$ 估算。
+访存时间 $T_{mem}$ 则需要精确估算 HBM 数据传输量 $V_{HBM}$。
+模型引入了 L2 Cache 命中率建模，特别是对于 GEMM，引入矩阵 $B$ 的重读惩罚系数 $\alpha_{miss}$ 以估算 L2 驱逐的影响：
+
+\begin{equation}
+    V_{HBM} = \text{Size}(A) + \alpha_{miss} \cdot \text{Size}(B) + \text{Size}(C)
+\end{equation}
+
+此外，为了修正理想 \textit{Roofline} 模型的偏差，引入了效率惩罚系数 $\eta$。
+流水线掩盖效率 $\eta_{pipe}$ 反映了 $K_{stage}$ 对延迟掩盖的能力（例如 $K_{stage} \ge 3$ 时取 1.0）；
+Wave 量化效应 $\eta_{wave}$ 反映了当 Grid Size 不能被 GPU 并行度整除时的尾部开销。
+最终的目标函数为最大化有效吞吐量：
+
+\begin{equation}
+    T_{exec}(\theta) = \frac{\max(T_{comp}, T_{mem})}{\eta_{pipe} \cdot \eta_{wave}}
+\end{equation}
+
+\paragraph{Warp Layout 的影响}
+除了分块大小，Warp Layout ($W_m \times W_n$) 对性能也有显著影响。
+这主要体现在三个方面：
+
+\begin{description}
+    \item[1)] \textbf{寄存器重用率}：每个线程束需要从共享内存（SRAM）中加载矩阵 A 和 B 的片段到寄存器，然后执行 MMA（Matrix Multiply Accumulate）指令。我们的目标是每加载一次数据，就能尽可能多地参与后续计算，最大化寄存器的复用率。其根本原因可以通过周长与面积的数学关系表达：线程束所负责的 Tile 面积为
+$$
+\text{Area} = \left(\frac{B_m}{W_m}\right) \times \left(\frac{B_n}{W_n}\right),
+$$
+而Warp所需加载的数据量（即周长，直接影响$\mathtt{ldmatrix}$指令的发射数和SRAM带宽压力）为
+$$
+\text{Load} = \left(\frac{B_m}{W_m}\right) \times B_k + \left(\frac{B_n}{W_n}\right) \times B_k.
+$$
+因此，Warp Tile 越接近正方形，单位加载数据所能完成的运算也越多。例如在 $128 \times 128$ 的大块 (Block)，由 8 个 Warps 负责时：
+\begin{itemize}
+  \item Layout $8 \times 1$：每个线程束处理 $16 \times 128$，需加载 $A(16 \times K) + B(128 \times K)$，B 的加载量极大，带宽开销大
+  \item Layout $2 \times 4$：每个线程束处理 $64 \times 32$，需加载 $A(64 \times K) + B(32 \times K)$，整体更均衡且加载量更小
+\end{itemize}
+因此，在自动调优模型中，引入了布局惩罚系数 $\eta_{layout}$，优先搜索使 Warp Tile 尽量接近正方形（比如 $2 \times 4$）的配置组合。
+    \item[2)] \textbf{SRAM Bank Conflicts}：NVIDIA A100 的 SRAM 由 32 个 Bank 组成，如果 Warp Layout 导致多个线程并发访问同一 Bank 内的不同地址，则会出现冲突并引起访存串行化。这种冲突在极端 Layout（如 $1 \times 8$ 或 $8 \times 1$）下最易出现，即使采用了 \textit{cp.async} 或 \textit{swizzling} 优化，过分“拉长”的 W 方向或 H 方向都可能导致 Bank Conflict 增多，从而限制带宽利用率和整体性能。
+    \item[3)] \textbf{Epilogue 效率}：线程束计算完成后，累加器 C 的结果要回写至全局内存（Global Memory）。写回性能离不开合并访问（Coalescing），通常 N 方向上的内存连续性尤为重要。如果 Warp Layout 中 $W_n$ 过大（N 维度切分太细），则每个线程束写回的数据在物理内存上将变得不连续，导致写入时段内部存储请求分散、带宽激增而未有效利用。
+\end{description}
+
+因此，模型中增加了对 $W_m, W_n$ 的搜索，引入布局惩罚系数 $\eta_{layout}$，倾向于选择使 Warp Tile 接近正方形（如 $2 \times 4$）的配置以最大化性能。
+
+\paragraph{模型评估与配置生成}
+
+基于上述构建的 Cost Model，本研究实现了一个自动化的配置搜索与评估流程。具体流程如下：
+
+\begin{itemize}
+  \item 输入：以指定的算法形状（Shape）作为输入；
+  \item 搜索与评估：利用 Cost Model 对高维参数空间进行剪枝和性能评估，自动筛选出最优配置；
+  \item 配置输出：最终产出 Top 10 分块配置（即不同的 Tile Size 与布局参数组合）。
+\end{itemize}
+
+如图~\ref{figure:cost_model_topk} 所示，分别展示了在 GEMM $4096 \times 4096 \times 4096$ 及 $8192 \times 8192 \times 8192$ 两种规模下，Cost Model 搜索出的前十组最佳配置。每组配置具体包含以下参数信息：
+
+\begin{center}
+\begin{tabular}{l l}
+\hline
+参数             & 含义 \\
+\hline
+Tile\_M, Tile\_N, Tile\_K & 分块大小（三维切分尺度） \\
+Warp Layout           & Warp 架构布局（如 $2\times4$, $4\times2$ 等）\\
+WarpTile         & 每个 Warp 负责的 Tile 尺寸 \\
+Stages           & Pipeline 阶段数 \\
+\hline
+\end{tabular}
+\end{center}
+
+这些多维度优化的分块和调度参数将自动交由 JIT（Just-In-Time）编译器，实现特定问题规模下的高性能代码生成与调优。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/gemm_evaluation_table_4096_4096_4096.png}
+    \caption{GEMM 4096$\times$4096$\times$4096 的 Cost Model Tile Size 配置}
+    \vspace{0.5em}
+    \includegraphics[width=0.95\linewidth]{figures/gemm_evaluation_table_8192_8192_8192.png}
+    \caption{GEMM 8192$\times$8192$\times$8192 的 Cost Model Tile Size 配置}
+    \vspace{0.5em}
+    \label{figure:cost_model_topk}
+\end{figure}
+
+\paragraph{层级执行模型}
+为了将高级操作有效地映射到 GPU 的并行架构上，AffineGraph 采用了一种基于 \textbf{原子块（AtomicTile）} 和 \textbf{微任务（Micro-Task）} 两个核心概念的层级执行模型。
+\begin{itemize}
+    \item \textbf{原子块（AtomicTile）：} 本课题将原子块定义为计算的基本逻辑单元，代表编译器调度的最小矩阵运算（例如 16x16 矩阵乘法）。它指定了需要完成的计算内容。
+    \item \textbf{微任务（Micro-Task）：} 微任务是实现原子块的物理执行序列。它定义了一个线程束如何执行逻辑计算，协调一系列硬件级操作，包括跨内存层级的数据移动和核心计算，如图~\ref{figure:micro-task-matmul-reduce}所示。
+\end{itemize}
+通过将逻辑计算单元（原子块）与其物理执行计划（微任务）分离，AffineGraph 能够系统地管理代码生成的复杂性，同时确保高效的硬件利用率。
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{figures/micro-task-matmul-reduce.pdf}
+  \caption{基于微任务的 GEMM-Reduce 在 NVIDIA GPU 上的执行流程}
+  \label{figure:micro-task-matmul-reduce}
+\end{figure}
+
+\paragraph{高效内存访问优化}
+生成高效微任务的一个关键组成部分是优化内存访问，如图~\ref{fig:effective_memory_access}所示。
+\begin{itemize}
+    \item \textbf{全局内存访问：} AffineGraph 根据线程束配置优化全局内存访问模式。一个关键的硬件约束是单个线程束的内存事务不能超过 128 字节，这对应于 L1 缓存行的大小。AffineGraph 利用这一知识为给定的张量形状选择最优的线程束组织，从而最小化带宽浪费。
+    \item \textbf{共享内存 Swizzling：} 为了减少共享内存的 Bank Conflicts，AffineGraph 应用了 Swizzling 技术来优化共享内存布局。编译器使用即时编译（JIT）来评估不同的策略，并选择能够在避免 Bank Conflicts 和内存压力之间取得平衡的最优方法。
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/effective_memory_access.pdf}
+\caption{NVIDIA GPU 上的高效内存访问优化策略}
+\label{fig:effective_memory_access}
+\end{figure}
+
+\subsubsection{案例研究：以 GEMM 为例}
+
+为了更具体地说明 AffineGraph 的工作流程，本节以矩阵乘法（GEMM）为例，展示如何将一个复杂的计算内核通过 AffineGraph 的层级化表示、变换和代码生成流程，最终映射为高性能的 CUDA 代码。
+
+
+\begin{figure*}[h]
+  \centering
+  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/gemm_case.pdf}
+  \caption{使用 AffineGraph 的 GEMM 案例研究。
+  (a) 高层 AffineGraph IR 表示，展示了缓冲区声明和数据移动的仿射映射。
+  (b) 降低后的数据流图，显式地表达了所有依赖关系。
+  (c) 矩阵 A 的分块与到 GPU 执行层级的映射细节，从全局内存、经由共享内存、最终到寄存器。
+  }
+  \label{figure:gemm_case}
+\end{figure*}
+
+\paragraph{层级化 IR 构建与数据流表示}
+如图~\ref{figure:gemm_case}(a) 所示，GEMM 的 AffineGraph IR 描述首先在不同的内存空间（全局内存 gA、共享内存 sA、寄存器 acc）中声明缓冲区。
+接着，通过一系列仿射映射（AffineMap）来精确定义数据分块和移动的逻辑。
+例如，\textit{Map\_G2S\_A} 定义了如何将一个 128x32 的数据块从全局内存移动到共享内存。
+这些仿射映射被组织在嵌套的块（Block）和图（Graph）中，直接反映了分块 GEMM 算法的嵌套循环结构。
+
+
+随后，这个高层 IR 被降低为一个显式表达所有依赖关系的数据流图，如图~\ref{figure:gemm_case}(b) 所示。
+在这个图中，代表数据传输的边（例如从 gA 到 sA）会被相应的仿射映射所标注，使得精确的分块和访问模式成为图的一部分，为后续的自动化分析和变换提供了基础。
+
+图~\ref{figure:gemm_case}(c) 则更详细地展示了矩阵 A 的数据如何被分块并映射到 GPU 的执行和内存层级。
+全局矩阵首先被划分为线程块（CTA）级别的大块，并通过 slice-k 方法分步加载到共享内存。
+在 CTA 内部，线程束（Warp）协作从共享内存中加载更小的微块到寄存器，以执行 MMA 指令。
+AffineGraph 为这整个分块和线程映射的层级结构提供了统一的数学表示。
+
+代码~\ref{lst:gemm_dsl_example} 展示了使用 AffineGraph IR 定义 GEMM 算子的代码示例。
+在代码中，首先定义了全局内存、共享内存和寄存器内存的缓冲区（Buffer），接着定义了计算算子（Operator）。
+通过构建分层的子图（SubGraph）结构，将算子与特定循环层级关联，并使用仿射映射（AffineMap）显式地描述了数据在不同内存层级间的流动与依赖关系。最终调用 \texttt{codegen()} 接口即可生成对应的硬件代码。
+
+\begin{figure}[h]
+\begin{lstlisting}[language=AffineDSL, caption={使用 AffineGraph IR 实现的 GEMM 示例}, label={lst:gemm_dsl_example}]
+# Define Buffer node
+gA  = Buffer("gA",  [256, 256], space="global")
+sA  = Buffer("sA",  [64, 64],   space="shared")
+rA  = Buffer("rA",  [16, 16],   space="register")
+acc = Buffer("acc", [16, 16],   space="register")
+
+# Define Operator node
+reg_mma = Operator("mma.sync", inputs=[rA, ...], output=acc)
+
+# Building a hierarchical SubGraph structure
+s2r_subgraph = SubGraph(
+    loop="k_inner",
+    nodes=[reg_mma],
+    affine_map=AffineMap(sA, rA, loop="k_inner")
+)
+
+top_level_graph = SubGraph(
+    loop="k_outer",
+   nodes=[s2r_subgraph],
+   affine_maps=[
+        AffineMap(gA, sA, loop="k_outer"), # Load: gA -> sA
+        AffineMap(gB, sB, ...),         # (Load gB -> sB)
+        AffineMap(acc, gC, ...)         # (Store final result)
+    ]
+)
+final_code = top_level_graph.codegen()
+\end{lstlisting}
+\end{figure}
+
+\begin{figure*}[h]
+  \centering
+  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/layout_transformation.pdf}
+  \caption{AffineGraph 中的布局推断与变换流水线。
+  (a) 从全局到共享内存的数据加载，根据 WarpLayout 自动进行向量化和合并内存访问。
+  (b) 共享内存布局推断，展示了如何根据 SharedTile 和 WarpLayout 推导 WarpTile 配置，并采用自适应的 Swizzling 策略来平衡 Bank Conflicts 和 CTA 占用率。
+  (c) 寄存器级的 BaseTile 抽象，其中单个线程处理8个元素，32个线程协作处理 16x16 的 ld.matrix 块以实现高效的 mma.sync 操作。
+  }
+  \label{figure:layout_inference}
+\end{figure*}
+
+\paragraph{布局推断与变换}
+在层级化 IR 构建之后，编译器会执行一个复杂的\textbf{布局推断}过程，将逻辑表示转换为具体的、经过硬件优化的执行计划，如图~\ref{figure:layout_inference} 所示。
+这个过程分为三个关键阶段：
+\begin{enumerate}
+    \item \textbf{从全局到共享内存的加载与自动向量化：} 编译器根据给定的 WarpLayout 配置，自动推断出线程束应如何迭代访问 GlobalTile 以最高效地加载数据，并自动应用向量化和合并访问优化，以最大化内存带宽利用率。
+    \item \textbf{共享内存布局推断与自适应 Swizzling：} 编译器根据 SharedTile 和 WarpLayout 的信息，自动推导最优的 WarpTile 配置。一个关键创新是自适应的 Swizzling 策略，它会根据 WarpTile 的维度自动选择合适的 Swizzling 模式（例如 32字节、64字节或128字节），在内存访问效率和 CTA 占用率之间进行权衡。
+    \item \textbf{寄存器级 BaseTile 抽象与张量核心集成：} 在最后阶段，数据被组织以用于寄存器级的计算。AffineGraph 引入了 BaseTile 抽象，定义了单个线程处理的最小单元。32个线程协作形成一个 WarpTile，其大小恰好匹配 16x16 的 \textit{ld.matrix} 操作，从而高效地将矩阵片段加载到为张量核心（Tensor Core）优化的寄存器中，为后续的 \textit{mma.sync} 计算做好准备。
+\end{enumerate}
+
+\paragraph{从数据流图生成 CUDA 代码}
+最后，AffineGraph 将优化后的数据流图转换为高性能的 CUDA 代码。
+这一过程由一个基于 C++ 模板库的后端实现。
+代码生成器遍历数据流图，并根据在优化阶段确定的分块形状、布局和数据类型来实例化相应的模板组件（如 \textit{GlobalToSharedLoader}, \textit{SharedToRegLoader}）。
+最终生成的内核代码结构清晰，通过一个 \textit{traits} 结构体来集中管理所有编译时配置，其主循环体则精确地协调了数据在不同内存层级间的流水线移动和计算。
+
+\begin{figure}
+\begin{lstlisting}[language=cplus, caption={基于模版库生成的 CUDA kernel}, label={lst:gemm_codegen}]
+// 1. Traits struct centralizes kernel configuration.
+struct KeGemmTraits {
+  // ... tile dimensions, data layouts, and types for A, B, C ...
+  using G2SLoaderA = GlobalToSharedLoader<...>;
+  using S2RLoaderA = SharedToRegLoader<...>;
+};
+// 2. Kernel implementation uses types from Traits.
+template <typename Traits>
+__global__ void gemm(const InType* dA, const InType* dB, AccType* dC) {
+  // ... setup memory pointers and tile offsets ...
+  typename Traits::G2SLoaderA g2s_a;
+  typename Traits::S2RLoaderA s2r_a;
+  typename Traits::RegC acc; // Accumulators in registers
+  // 3. Main loop for pipelined data movement and computation.
+  for (int k = ...) {
+    // Load tiles from global to shared memory
+    g2s_a(gAs(k), sA);
+    g2s_b(gBs(k), sB);
+    __copy_async();
+    __syncthreads(); // Wait for loads
+    // Inner loop for computation
+    for (int k_inner = ...) {
+      s2r_a(sAs(k_inner), rA); // Load from shared to registers
+      s2r_b(sBs(k_inner), rB);
+      compute::gemm(rA, rB, acc);
+    }
+  }
+  // 4. Store results back to global memory.
+  r2s_c(acc, sC);
+  __syncthreads();
+  s2g_c(sC, gC);
+}
+\end{lstlisting}
+\end{figure}
+
+\subsubsection{系统实现}
+
+AffineGraph 的实现采用了多语言混合编程的策略，以兼顾开发效率与运行性能。
+其中，用户编程接口和解析器部分由 Python 实现，提供了友好的 API。
+图表示的核心组件，包括图的构建、分析与优化变换，则由 Rust 实现，利用其高性能和内存安全的特性来处理复杂的图算法。
+最终的硬件代码生成部分由 C++ 实现，针对 NVIDIA GPU 生成了高度优化的 CUDA 代码，能够高效利用 Tensor Core 等硬件单元。
+
+\subsubsection{实验评估}
+
+\paragraph{实验环境设置} 本课题的实验是在配备 80GB HBM2 显存的 NVIDIA A100 GPU 上进行的，该 GPU 拥有 108 个流多处理器（SM），其峰值 FP16 Tensor Core 性能达到 312 TFLOPS。
+
+\paragraph{深度学习负载} 本课题的评估侧重于构成大语言模型基础的基本深度学习操作。
+本课题首先从表现出各种访问模式的原始内存操作（Load/Store）开始，这对于理解本课题编译器的基本内存访问能力至关重要。
+对于矩阵操作，本课题评估了具有不同维度（M, N, K）的标准矩阵乘法（GEMM），以评估编译器优化计算密集型操作的能力。
+为了展示算子融合的有效性，本课题测试了融合的两个 GEMM 操作，其中两个连续的矩阵乘法被组合成一个单一操作。
+本课题还评估了 Batched GEMM 操作，这对于经常同时处理多个输入的深度学习负载至关重要。
+最后，本课题评估了编译器在 FlashAttention~\cite{dao2022flashattention}（一种内存高效的注意力机制）上的性能，涵盖了不同的序列长度和隐藏层大小。
+选择这些负载是为了全面评估本课题的编译器在处理内存受限（Memory-bound）和计算受限（Compute-bound）操作方面的能力，以及其在优化复杂算法模式方面的有效性。
+
+\paragraph{基准对比} 本课题将 AffineGraph 与最先进的 DNN 框架和库进行了比较。
+对于标准矩阵乘法（GEMM），本课题与 NVIDIA 针对 CUDA 优化的 BLAS 库 cuBLAS、提供线性代数子程序 CUDA 模板的 CUTLASS~\cite{CUTLASS} 以及用于编写高效 GPU 代码的开源语言和编译器 Triton~\cite{pldi/tillet2019triton} 进行了评估。
+对于融合 GEMM 操作，本课题将 CUTLASS、PyTorch~\cite{nips/paszke2019pytorch} 和 Triton~\cite{pldi/tillet2019triton} 作为基准。
+对于注意力操作，本课题与 FlashAttention 算法的手动优化实现 FlashAttention-2~\cite{dao2023flashattention}、PyTorch 和 Triton 进行了比较。
+所有评估均以预热迭代开始，随后重复执行每个负载至少 5 秒，以确保结果准确稳定。
+平均性能指标（如加速比）是使用所有实验的几何平均值计算得出的。
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/evaluations/layout_comparison.png}
+    \caption{不同形状和不同 Warp Layout 下的内存操作执行时间（ms）}
+    \label{figure:layout_comparison}
+\end{figure}
+
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=\textwidth]{figures/evaluations/affine_evaluation.png}
+%     \caption{
+%     不同深度学习负载在不同形状下的算法执行时间（ms）。\\
+%     (a)~GEMM聚焦于标准的矩阵乘法场景，比较了 AffineGraph、CUTLASS、Triton 等方案在常见矩阵维度下的执行延迟；\\
+%     (b)~Batch GEMM展示了不同方案在批量矩阵乘法即多组矩阵同时运算时的表现，体现了算子在数据并行下的效率；\\
+%     (c)~Fused Two GEMMs考量了融合多个GEMM算子的情形，能够反映出算子融合对整体性能的提升效果；\\
+%     (d) 和 (e)~分别针对 FlashAttention-2 算法在隐藏维度为128和256下的执行性能进行评测，该算子作为现代大模型中的关键高性能注意力机制，评估其在短（128）和较长（256）序列长度下的表现。
+%     }
+%     \label{figure:affine_evaluation}
+% \end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/evaluations/affine_evaluation_basic.png}
+    \caption{
+    (a) GEMM聚焦于标准的矩阵乘法场景，比较了 AffineGraph、CUTLASS、Triton 等方案在常见矩阵维度下的执行延迟；\\
+    (b) Batch GEMM展示了不同方案在批量矩阵乘法即多组矩阵同时运算时的表现，体现了算子在数据并行下的效率；\\
+    (c) Fused Two GEMMs考量了融合多个GEMM算子的情形，能够反映出算子融合对整体性能的提升效果；\\
+    }
+    \label{figure:affine_evaluation_basic}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/evaluations/affine_evaluation_attention.png}
+    \caption{
+    Attention 相关负载在不同形状下的算法执行时间（ms）。\\
+    (a) 和 (b) 分别针对 FlashAttention-2 算法在隐藏维度为128和256下的执行性能进行评测，该算子作为现代大模型中的关键高性能注意力机制。 \\
+    (c) 和 (d) 分别针对 Block Sparse Attention 在隐藏维度为 64 和 128 下的执行性能评测，该算子在现代大模型中作为稀疏注意力的基础。
+    }
+    \label{figure:affine_evaluation_attention}
+\end{figure}
+
+实验结果表明，AffineGraph 在多种典型深度学习算子上都取得了具有竞争力的性能，如图~\ref{figure:affine_evaluation_basic} 和 ~\ref{figure:affine_evaluation_attention} 所示。
+\begin{itemize}
+    \item \textbf{GEMM 操作：} 在标准的矩阵乘法（GEMM）和批量矩阵乘法（Batch GEMM）上，AffineGraph 的性能与 CUTLASS 相当，并显著优于 Triton。
+    \item \textbf{算子融合：} 在融合的 GEMM 操作上，AffineGraph 展示了巨大的性能优势，平均相比 CUTLASS 取得了 2.52 倍的加速，相比 Triton 取得了 2.18 倍的加速。
+    \item \textbf{FlashAttention：} 在 FlashAttention 上，AffineGraph 相比手写的优化实现以及 Triton 版本，在较短序列长度下取得了显著的性能提升（最高达 3.72 倍），在长序列下也保持了具有竞争力的性能。
+    \item \textbf{Block Sparse Attention}: 在 Block Sparse Attention 上，AffineGraph 相比 Triton 的实现有相似的性能，超越了原生不使用稀疏注意力的 FlashAttention-2 的性能。
+\end{itemize}
+
+这些结果初步验证了 AffineGraph 作为一个新型编译器框架在生成高性能硬件代码方面的潜力，尤其是在处理复杂的、需要硬件感知的算法时，其优势更为明显。
+
+\subsection{下一步研究计划}
+
+为了进一步完善 AffineGraph 框架并扩展其应用范围，下一步的研究将主要集中在以下几个方面：
+
+\begin{enumerate}
+    \item \textbf{扩展后端支持与算子库：} 
+    目前工作主要集中在 NVIDIA GPU 上。
+    未来计划将 AffineGraph 扩展到其他硬件后端，例如 AMD GPU 或其他类型的深度学习加速器。
+    同时，将进一步丰富算子库，以支持更多种类的深度学习模型。
+    \item \textbf{端到端模型部署与评估：} 
+    当前的评估主要集中在核心算子上。
+    下一步将进行端到端（End-to-End）的完整模型（如 Llama, Qwen 等）部署与评估，以验证 AffineGraph 在真实应用场景下的综合性能和实用性。
+\end{enumerate}
