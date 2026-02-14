@@ -90,7 +90,7 @@
 %---------------------------------------------------------------------------%
 \AtEndOfPackage{% class cfg loaded after package to make preamble commands take effect
     \makeatletter
-    \InputIfFileExists{Style/ucasproposal.cfg}{}{}
+    \InputIfFileExists{setup/style/ucasproposal.cfg}{}{}
     \makeatother
 }
 %---------------------------------------------------------------------------%
