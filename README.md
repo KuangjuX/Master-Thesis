@@ -1,5 +1,11 @@
 # `ucasproposal` 国科大开题报告 LaTeX 模板
 
+## 编译方法
+
+编译脚本已移动至 `scripts/` 目录：
+* Linux/macOS: `./scripts/artratex.sh`
+* Windows: `.\scripts\artratex.bat`
+
 ## 模板下载
 
 * 页面右边点击：**Clone or download -> Download Zip**
