@@ -1,0 +1,75 @@
+# Evaluation repositories
+eval_repos/*
+
+# LaTeX auxiliary files
+*.aux
+*.auxlock
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.synctex(busy)
+*.toc
+*.lof
+*.lot
+*.lol
+*.idx
+*.ilg
+*.ind
+*.glo
+*.gls
+*.glg
+*.acn
+*.acr
+*.alg
+*.brf
+*.figlist
+*.makefile
+*.figlist
+*.fls
+*.xdy
+*.xdv
+*.nav
+*.snm
+*.vrb
+
+# LaTeX build files (exclude compiled PDFs, but keep figure PDFs)
+*.pdf
+!figures/**/*.pdf
+
+# Font files
+missfont.log
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/

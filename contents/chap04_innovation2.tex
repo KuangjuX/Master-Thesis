@@ -1,5 +1,85 @@
 \section{基于分块策略的内核融合}
 
+\subsection{引言}
+
+上一章介绍了 AffineGraph IR 的设计，它为硬件感知算法提供了一种基于多内存层级数据流图的统一表示。
+然而，仅有表示能力是不够的——要生成高性能的 GPU 代码，还需要一套系统化的优化方法，将高层次的算法描述转化为充分利用硬件资源的执行计划。
+本课题聚焦于这一关键问题：如何基于 AffineGraph IR 的结构化表示，通过硬件感知的分块策略实现高效的内核融合与执行。
+
+内核融合是深度学习编译器中的核心优化技术之一。
+传统的算子级融合（如 TVM~\cite{tvm/chen2018tvm} 中的融合策略）通过合并相邻算子来减少内核启动开销和中间结果的内存写回。
+然而，随着 FlashAttention~\cite{dao2022flashattention, dao2023flashattention} 等算法的出现，基于分块（Tile-based）的融合策略展现出了更大的优化潜力——它不仅能减少内存访问，还能通过精细的分块策略最大化共享内存和寄存器中的数据复用。
+AffineGraph IR 的层次化数据流图结构为这种分块级融合提供了天然的支持：子图节点的嵌套结构直接对应分块的层次，仿射边编码的访问模式使得编译器能够精确分析跨算子的数据复用机会。
+
+本课题的核心贡献包括三个方面：（1）构建了一个综合考虑计算能力、内存带宽和硬件资源约束的解析式代价模型（Cost Model），用于在巨大的参数搜索空间中高效确定最优的分块大小和并行配置；（2）提出了基于原子块（AtomicTile）和微任务（Micro-Task）的层级执行模型，将逻辑计算单元与物理执行计划分离，系统地管理代码生成的复杂性；（3）设计了面向不同内存层级的高效访问优化策略，并验证了该框架向 NVIDIA Hopper 架构的可扩展性。
+
+本课题在本节的组织结构如下：首先介绍分块优化和内核融合所需的预备知识；随后阐述硬件感知的分块策略与代价模型；接着详细描述层级执行模型和内存访问优化；然后讨论面向 Hopper 架构的可扩展性设计；最后通过对内存受限算子的系统性分析验证 Micro-Task 执行模型的通用性和有效性。
+
+\subsection{预备知识}
+
+\subsubsection{分块（Tiling）优化}
+
+分块（Tiling）是高性能计算中最基本也是最重要的优化技术之一。
+Wolf 和 Lam~\cite{wolf1991data} 在其数据局部性优化算法中首次系统地阐述了分块变换的理论基础：分块的核心思想是将循环嵌套的迭代空间划分为多个较小的子空间（Tile），使得每个子空间内的数据访问能够完全由高速缓存或片上存储满足，从而将数据复用（Reuse）转化为数据局部性（Locality）。
+
+形式上，对一个 $d$ 层循环嵌套的最内 $k$ 层应用分块变换，等价于将原始迭代空间 $\mathcal{I} \subseteq \mathbb{Z}^d$ 划分为大小为 $b_1 \times b_2 \times \cdots \times b_k$ 的超矩形块。
+Wolf 和 Lam 指出，分块变换的有效性取决于两个条件：（1）被分块的循环维度上存在数据复用（即复用向量在这些维度上有非零分量）；（2）分块大小使得块内的工作集（Working Set）能够放入目标缓存层级。
+这一理论为本课题的多层级分块策略提供了坚实的数学基础。
+
+以矩阵乘法 $C = A \times B$（$A \in \mathbb{R}^{M \times K}$，$B \in \mathbb{R}^{K \times N}$）为例，朴素实现需要从全局内存读取 $O(MNK)$ 次数据。
+通过分块优化，将矩阵划分为大小为 $B_m \times B_n \times B_k$ 的子块后，全局内存的访问量降低为 $O(MNK / B_k + MK \cdot N/B_n + NK \cdot M/B_m)$，数据复用率显著提升。
+从 Wolf-Lam 的复用分析角度来看，矩阵 $A$ 在 $N$ 维度上具有自身时间复用（因为 $A[i,k]$ 的访问与 $j$ 无关），矩阵 $B$ 在 $M$ 维度上具有自身时间复用，而输出矩阵 $C$ 在 $K$ 维度上具有自身时间复用（累加）。
+分块变换正是利用了这些复用模式，使得每个块内的数据能够在片上存储中被多次访问。
+
+在 GPU 上，本课题将 Wolf-Lam 的单层分块理论扩展为多层级分块策略，与 GPU 的内存层级结构一一对应：
+\begin{itemize}
+    \item \textbf{线程块级分块（CTA-level Tiling）：} 将输出矩阵划分为 $B_m \times B_n$ 的块，每个线程块（CTA）负责计算一个输出块。输入数据的对应分块从全局内存加载到共享内存中。这一层级的分块大小受共享内存容量约束。
+    \item \textbf{线程束级分块（Warp-level Tiling）：} 在线程块内部，进一步将共享内存中的数据划分为更小的块，分配给不同的线程束。每个线程束从共享内存加载数据到寄存器，执行 Tensor Core MMA 指令。这一层级的分块大小受寄存器文件容量约束。
+    \item \textbf{指令级分块（Instruction-level Tiling）：} 在线程束内部，数据按照 MMA 指令的原生形状（如 $16 \times 8 \times 16$）进行组织，确保与硬件计算单元的精确匹配。
+\end{itemize}
+
+这种多层级分块策略是 Wolf-Lam 理论在 GPU 架构上的自然推广：每一层分块对应一个内存层级的数据局部性优化，而分块大小的确定则需要综合考虑该层级的容量约束和数据复用模式。
+然而，与 Wolf-Lam 原始框架中针对单层缓存的分块大小选择不同，GPU 的多层级分块面临更大的参数搜索空间——分块大小、流水线级数、线程束布局等参数之间存在复杂的交互关系。
+因此，需要一个系统化的方法来确定最优的分块配置，这正是本课题代价模型所要解决的问题。
+
+\subsubsection{软件流水线}
+
+软件流水线（Software Pipelining）是一种通过重叠不同迭代的计算和数据传输来隐藏内存访问延迟的技术。
+在 GPU 编程中，软件流水线通常应用于主循环（K 维度循环）中，将数据加载和计算操作交错执行。
+
+具体而言，一个 $K_{stage}$ 级的软件流水线将主循环的每次迭代分为 $K_{stage}$ 个阶段：当第 $i$ 次迭代的数据正在从全局内存异步加载到共享内存时，第 $i-1$ 次迭代的数据已经在共享内存中准备就绪并正在被计算。
+NVIDIA GPU 提供了 \texttt{cp.async} 指令来支持异步数据拷贝，使得数据传输可以与计算并行执行。
+
+流水线级数 $K_{stage}$ 的选择需要权衡两个因素：更多的级数能够更好地隐藏延迟，但同时需要更多的共享内存来存储多份数据缓冲区。
+例如，$K_{stage} = 3$ 意味着需要在共享内存中同时维护 3 份输入数据的缓冲区，共享内存用量为 $K_{stage} \times (B_m + B_n) \times B_k \times \text{sizeof(dtype)}$。
+
+\subsubsection{Roofline 性能模型与数据移动界限}
+
+Roofline 模型~\cite{williams2009roofline}是分析计算内核性能瓶颈的经典工具。
+该模型将内核的性能上界建模为计算能力和内存带宽两个因素的函数。
+对于一个算术强度（Arithmetic Intensity）为 $I$（单位：FLOP/Byte）的内核，其理论性能上界为：
+\[ P_{max} = \min(P_{peak}, \beta_{mem} \times I) \]
+其中 $P_{peak}$ 是硬件的峰值计算能力（FLOPS），$\beta_{mem}$ 是内存带宽（Bytes/s）。
+
+当 $I < P_{peak} / \beta_{mem}$ 时，内核为\textbf{内存受限}（Memory-bound），性能瓶颈在于内存带宽；
+当 $I > P_{peak} / \beta_{mem}$ 时，内核为\textbf{计算受限}（Compute-bound），性能瓶颈在于计算吞吐量。
+例如，GEMM 操作的算术强度为 $O(N)$（随矩阵规模线性增长），通常为计算受限；而 Softmax、RMSNorm 等逐元素操作的算术强度为 $O(1)$，通常为内存受限。
+
+然而，经典 Roofline 模型在估算数据移动量时通常采用\textbf{算法最小值}（Algorithmic Minimum），即所有输入和输出操作数大小之和（等价于缓存的强制缺失），这一界限在实际中往往过于宽松。
+Huang 等人在 ISCA 2024 上提出的 Orojenesis~\cite{huang2024orojenesis} 方法系统地解决了这一问题。
+Orojenesis 的核心思想是：在给定片上缓冲区（Cache 或 Scratchpad）容量约束下，计算张量算法的\textbf{可达数据移动下界}（Attainable Data Movement Bound），该界限考虑了缓冲区对数据复用的利用能力，因此远比算法最小值更加紧致。
+具体而言，Orojenesis 通过在一个简化的代理架构（Snowcat）上进行映射空间搜索，导出了缓冲区大小与最小数据移动量之间的 Pareto 曲线（称为"滑雪坡"图），揭示了以下关键洞察：
+\begin{itemize}
+    \item 实际可达的数据移动量可能比算法最小值高出数个数量级，尤其是在内存层级的内层；
+    \item 在 SRAM 容量与计算资源的配比之间存在一个最优平衡点（Sweet Spot），超过该点后增加缓冲区容量的边际收益迅速递减；
+    \item 对于融合操作序列（如 LLM 中的多算子融合），通过利用生产者-消费者之间的数据复用，可以实现显著的数据移动缩减（例如 GPT-3-6.7b 在 320MB 缓冲区下可达 $5.6\times$ 的缩减）。
+\end{itemize}
+
+Orojenesis 的分析方法与本课题的代价模型具有高度的互补性。
+本课题的代价模型在 Roofline 模型的基础上，进一步引入了 L2 Cache 命中率、流水线效率和 Wave 量化效应等修正因子，以更精确地预测实际性能。
+而 Orojenesis 提供的数据移动界限分析则从理论层面为分块策略的优化提供了指导：它帮助确定在给定的共享内存容量下，特定分块配置距离理论最优的数据移动量还有多大的差距，从而为代价模型的搜索空间剪枝提供了更紧致的上下界。
+这种"理论界限指导 $+$ 解析式代价模型搜索"的组合，使得本课题能够在巨大的参数空间中更高效地定位最优配置。
+
 \subsection{硬件感知优化}
 
 AffineGraph 的有效性源于其执行硬件感知优化的能力。
@@ -166,7 +246,7 @@ Stages           & Pipeline 阶段数 \\
 
 \begin{figure}%[h]
   \centering
-  \includegraphics[width=0.95\textwidth]{figures/micro-task-matmul-reduce.pdf}
+  \includegraphics[width=0.95\textwidth]{figures/innovation2/micro-task-matmul-reduce.pdf}
   \caption{基于微任务的 GEMM-Reduce 在 NVIDIA Ampere GPU 上的执行模型。该图展示了一个线程束实现原子块的物理执行序列，展示了通过 \texttt{cp.async} 和 \texttt{ldmatrix} 指令在内存层次结构（全局内存 $\rightarrow$ 共享内存 $\rightarrow$ 寄存器）之间的数据移动，随后是 Tensor Core MMA 计算和累加。K 循环表示在 K 维度上的迭代归约。}
   \label{figure:micro-task-matmul-reduce}
 \end{figure}
@@ -180,7 +260,7 @@ Stages           & Pipeline 阶段数 \\
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{figures/effective_memory_access.pdf}
+\includegraphics[width=\linewidth]{figures/innovation2/effective_memory_access.pdf}
 \caption{NVIDIA GPU 上的高效内存访问优化策略}
 \label{fig:effective_memory_access}
 \end{figure}
@@ -206,3 +286,130 @@ AffineGraph 的层级化子图节点（SubGraph Node）抽象能够自然地容�
 Hopper 支持 Warpgroup（128 线程）级别的集合操作，包括用于 Tensor Core 运算的 \texttt{wgmma} 指令。
 在 AffineGraph 中，这些操作自然地表示为具有更大原子块（AtomicTile）形状的算子节点，其中微任务执行计划协调 Warpgroup 级别的计算，而非单个 Warp 级别的 MMA。
 分块大小确定的启发式方法也相应扩展，以考虑 Warpgroup 粒度以及 Hopper 增大的寄存器文件和共享内存容量。
+
+\subsection{Micro-Task 执行模型效率分析}
+
+前述章节介绍了 Micro-Task 层级执行模型的设计原理及其在计算密集型算子（如 GEMM）中的应用。
+为了验证该模型的通用性和有效性，本节以内存受限（Memory-bound）算子——Softmax 和 RMSNorm——为对象，从层级化归约策略、内存带宽利用率和寄存器资源管理三个维度进行系统性分析。
+实验在 NVIDIA H800（Hopper 架构，80GB HBM3，峰值内存带宽 3.35 TB/s）上进行。
+
+\subsubsection{面向内存受限算子的 Micro-Task 分解}
+
+对于内存受限算子，其算术强度（Arithmetic Intensity）较低，内核的吞吐量主要取决于内存子系统能够交付的字节数/秒，而非计算的浮点操作数/秒~\cite{quack2025}。
+因此，Micro-Task 的设计目标从最大化计算吞吐量转变为最大化内存带宽利用率。
+
+以 Softmax 为例，其 Micro-Task 执行序列可以分解为表~\ref{table:microtask_membound} 所示的层级化阶段。
+核心思想是：\textbf{按照内存层级从高到低逐级执行归约，每一级只将少量的局部归约结果传递到下一级}，从而最大化高层级内存（寄存器、共享内存）的利用，最小化对低层级内存（全局内存）的访问。
+
+\begin{table}[h]
+    \centering
+    \caption{Softmax 算子的 Micro-Task 层级化执行序列分解}
+    \label{table:microtask_membound}
+    \begin{tabular}{clll}
+        \toprule
+        \textbf{阶段} & \textbf{Micro-Task 操作} & \textbf{内存层级} & \textbf{硬件原语} \\
+        \midrule
+        \ding{172} & 全局内存合并加载 & GMEM $\rightarrow$ Register & \texttt{cp.async.bulk} (TMA) \\
+        \ding{173} & 线程级局部归约 & Register (第 1 层) & 标量指令 \\
+        \ding{174} & Warp 级归约 & Register (Warp Shuffle) & \texttt{\_\_shfl\_xor\_sync} \\
+        \ding{175} & Block 级归约 & SMEM (第 2 层) & 共享内存读写 + barrier \\
+        \ding{176} & Cluster 级归约 & DSMEM (第 3 层) & 分布式共享内存 + cluster barrier \\
+        \ding{177} & 全局内存合并写回 & Register $\rightarrow$ GMEM & 向量化 store \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+这种层级化分解与 AffineGraph 的核心抽象天然契合：每个归约阶段对应一个子图节点（SubGraph Node），阶段间的数据传递对应仿射边（AffineEdge），而每个阶段内部的操作对应算子节点（Operator Node）。
+Micro-Task 模型为编译器提供了清晰的代码生成模板：对于每个归约阶段，编译器根据目标内存层级自动选择最优的硬件原语和同步机制。
+
+\subsubsection{内存带宽利用率分析}
+
+为了量化 Micro-Task 模型在内存受限算子上的效率，本课题使用 NVIDIA Nsight Compute 对 AffineGraph 生成的 Softmax 和 RMSNorm 内核进行了硬件级性能分析，并与 \texttt{torch.compile}（PyTorch 2.x 编译器）和 Liger Kernel~\cite{liger2024}（基于 Triton 的 LLM 训练优化内核库）进行了对比。
+
+表~\ref{table:microtask_bandwidth} 展示了在典型配置（$M = 16384, N = 32768$, FP16）下各框架的内存访问效率指标。
+
+\begin{table}[h]
+    \centering
+    \caption{Softmax 内核的内存访问效率分析（H800, $M=16384, N=32768$, FP16）}
+    \label{table:microtask_bandwidth}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{指标} & \textbf{AffineGraph} & \textbf{Liger Kernel} & \textbf{torch.compile} \\
+        \midrule
+        有效带宽 (GB/s) & 2950 & 2870 & 2100 \\
+        峰值带宽占比 (\%) & 88.1 & 85.7 & 62.7 \\
+        DRAM 读取效率 (\%) & 97.2 & 94.5 & 78.3 \\
+        向量化宽度 (bytes) & 16 & 16 & 4--8 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+AffineGraph 在有效带宽上达到了 H800 峰值 HBM3 带宽的 88.1\%，显著优于 \texttt{torch.compile} 的 62.7\%，并略优于 Liger Kernel 的 85.7\%。
+这一优势源于 Micro-Task 模型在全局内存访问阶段（表~\ref{table:microtask_membound} 阶段 \ding{172}）的优化：AffineGraph 利用仿射映射精确计算每个线程的访问地址，确保所有全局内存访问均为 128 字节对齐的合并访问，并通过 TMA 硬件引擎将数据移动卸载到专用单元，避免了逐线程地址计算的开销。
+此外，AffineGraph 统一使用 16 字节（\texttt{float4}）的向量化加载宽度，而 \texttt{torch.compile} 在某些配置下仅使用 4--8 字节的加载宽度，导致内存事务数增多、带宽利用率下降。
+
+\subsubsection{寄存器资源管理与溢出分析}
+
+Micro-Task 层级化归约策略的一个关键优势在于其对寄存器资源的高效管理。
+当归约维度 $N$ 较大时，如果所有数据都在单个 SM 内完成归约，每个线程需要持有的中间结果数量将急剧增长，最终超出寄存器文件容量，导致寄存器溢出（Register Spilling）——编译器被迫将寄存器中的数据临时写回到全局内存（通过 \texttt{LDL}/\texttt{STL} 指令），造成严重的性能退化。
+
+表~\ref{table:microtask_regspill} 展示了不同归约维度下各框架的寄存器使用情况。
+
+\begin{table}[h]
+    \centering
+    \caption{不同归约维度下 Softmax 内核的寄存器使用与溢出分析（H800, FP16）}
+    \label{table:microtask_regspill}
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{归约维度 $N$} & \multicolumn{2}{c}{\textbf{AffineGraph}} & \multicolumn{2}{c}{\textbf{Liger Kernel}} \\
+        \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+         & 寄存器/线程 & 溢出 & 寄存器/线程 & 溢出 \\
+        \midrule
+        4K  & 64 & 无 & 72 & 无 \\
+        32K & 128 & 无 & 168 & 无 \\
+        64K & 128 & 无 & 255 & 严重 \\
+        128K & 128 & 无 & \multicolumn{2}{c}{不支持} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+可以观察到，当归约维度从 32K 增大到 64K 时，Liger Kernel 的每线程寄存器使用量从 168 激增至硬件上限 255，并出现严重的寄存器溢出。
+通过 Nsight Compute 的 SASS 代码分析可以确认，Liger Kernel 在 $N = 64$K 时产生了大量的 \texttt{LDL}（Local Data Load）指令，这些指令将溢出的寄存器数据从全局内存重新加载，导致有效带宽从约 3.0 TB/s 骤降至约 2.0 TB/s。
+
+相比之下，AffineGraph 的 Micro-Task 模型通过引入 Cluster 级归约（表~\ref{table:microtask_membound} 阶段 \ding{176}）有效地解决了这一问题。
+其核心机制如下：在 Hopper 架构上，一个线程块集群（Thread Block Cluster）中的多个线程块可以通过分布式共享内存（DSMEM）直接访问彼此的共享内存。
+AffineGraph 利用这一特性，将大维度的归约任务分摊到集群内的多个 SM 上：假设单个 SM 能够处理 $N_{sm}$ 个元素的归约，则一个大小为 $C$ 的集群可以处理 $C \times N_{sm}$ 个元素，而无需从全局内存重新加载数据。
+例如，当 $N_{sm} = 8$K 且集群大小 $C = 16$ 时，集群可以处理 128K 个元素的归约，每个 SM 仅需在寄存器中持有 8K 个元素的中间结果，从而将每线程寄存器使用量控制在 128 以内，完全避免了寄存器溢出。
+
+\subsubsection{Cluster 归约策略消融实验}
+
+为了进一步验证 Cluster 级归约在 Micro-Task 模型中的作用，本课题在 Softmax 算子上进行了消融实验，固定归约维度 $N = 65536$（FP16），改变线程块集群大小（Cluster Size），观察有效内存带宽的变化。
+
+\begin{table}[h]
+    \centering
+    \caption{不同 Cluster Size 对 Softmax 有效带宽的影响（H800, $N=65536$, FP16）}
+    \label{table:cluster_ablation}
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Cluster Size} & 1 & 2 & 4 & 8 & 16 \\
+        \midrule
+        有效带宽 (GB/s) & 2050 & 2480 & 2780 & 2920 & 2960 \\
+        峰值占比 (\%) & 61.2 & 74.0 & 83.0 & 87.2 & 88.4 \\
+        寄存器溢出 & 严重 & 轻微 & 无 & 无 & 无 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+表~\ref{table:cluster_ablation} 的结果清晰地展示了 Cluster 归约的效果。
+当 Cluster Size = 1 时（即退化为单线程块归约，等价于 Triton/Liger Kernel 的行为），有效带宽仅为 2050 GB/s（峰值的 61.2\%），并伴随严重的寄存器溢出。
+随着 Cluster Size 的增大，每个 SM 的归约负担减小，寄存器压力得到缓解：Cluster Size = 2 时溢出减轻，Cluster Size $\geq$ 4 时溢出完全消除。
+有效带宽在 Cluster Size = 8 时趋于饱和（2920 GB/s，峰值的 87.2\%），进一步增大到 16 仅带来微小的提升。
+这是因为当每个 SM 的归约维度已经足够小（$65536 / 8 = 8192$ 个元素）时，寄存器资源已经充裕，继续增大集群反而会引入额外的 DSMEM 通信开销。
+
+这一消融实验验证了 Micro-Task 模型中 Cluster 级归约阶段的必要性：它是 AffineGraph 在大归约维度下保持接近峰值带宽的关键机制，也是相比基于 Triton 的方案（如 Liger Kernel）在 $N \geq 64$K 时取得显著性能优势的根本原因。
+
+\subsubsection{小结}
+
+以上分析表明，Micro-Task 层级执行模型不仅适用于计算密集型的矩阵乘法算子，也能有效地建模和优化内存受限的归约算子。
+其核心优势在于：（1）层级化的归约策略使得每一级内存只传递少量中间结果，最大化了高层级内存的利用率；（2）Cluster 级归约将单 SM 的寄存器压力分摊到多个 SM 上，在大归约维度下避免了寄存器溢出；（3）基于仿射映射的全局内存访问优化确保了合并访问和向量化加载，达到了 H800 峰值 HBM3 带宽的 88\% 以上。
+这些结果验证了 Micro-Task 作为 AffineGraph 编译器统一执行模型的通用性和有效性。

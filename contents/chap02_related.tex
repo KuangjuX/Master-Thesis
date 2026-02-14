@@ -9,7 +9,7 @@
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/tvm.png}
+    \includegraphics[width=\textwidth]{figures/related/tvm.png}
     \caption{TVM 深度学习编译器架构~\cite{tvm/chen2018tvm}}
     \label{figure:tvm}
 \end{figure}
@@ -27,7 +27,7 @@ TVM 的整体系统架构如图 ~\ref{figure:tvm} 所示。
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/Ansor.png}
+    \includegraphics[width=\textwidth]{figures/related/Ansor.png}
     \caption{Ansor 系统设计~\cite{tvm/zheng2020ansor}}
     \label{figure:Ansor}
 \end{figure}
@@ -38,7 +38,7 @@ Ansor~\cite{tvm/zheng2020ansor} 更进一步可以自动生成一个覆盖全面
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/BOLT.png}
+    \includegraphics[width=\textwidth]{figures/related/BOLT.png}
     \caption{BOLT 系统设计~\cite{tvm/xing2022bolt}}
     \label{figure:BOLT}
 \end{figure}
@@ -52,7 +52,7 @@ BOLT 的系统设计如图~\ref{figure:BOLT}所示。
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/AMOS.png}
+    \includegraphics[width=\textwidth]{figures/related/AMOS.png}
     \caption{AMOS 系统设计~\cite{isca/zheng2022amos}}
     \label{figure:AMOS}
 \end{figure}
@@ -72,18 +72,23 @@ AMOS 的映射过程分为两个阶段，第一阶段将循环迭代映射到虚
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=0.7\textwidth]{figures/Tiramisu.png}
+    \includegraphics[width=0.7\textwidth]{figures/related/Tiramisu.png}
     \caption{Tiramisu 系统设计~\cite{cgo/baghdadi2019tiramisu}}
     \label{figure:Tiramisu}
 \end{figure}
 
-与基于 DAG 的深度学习编译器不同，基于 Polyhedral 的深度学习编译器使用线性规划、放身边换和其他数学方法来优化具有边界和分支静态控制流的基于循环的代码~\cite{TPDS/li2020deep}。
-与 DAG-based IR 相比，多面体模型中内存引用和循环嵌套的边界可以是具有任意形状的多面体。
+与基于 DAG 的深度学习编译器不同，基于 Polyhedral 的深度学习编译器使用线性规划、仿射变换和其他数学方法来优化具有边界和分支静态控制流的基于循环的代码~\cite{TPDS/li2020deep}。
+多面体编译模型的理论基础可以追溯到 Wolf 和 Lam~\cite{wolf1991data} 在 1991 年提出的数据局部性优化算法。
+该工作首次系统地将仿射变换应用于循环嵌套的优化：通过将循环的迭代空间建模为整数格点集合，将数组访问建模为仿射映射，Wolf 和 Lam 提出了基于复用向量（Reuse Vector）和复用空间（Reuse Space）的数据复用分析方法，能够自动识别循环嵌套中的时间复用（Temporal Reuse）、空间复用（Spatial Reuse）和组复用（Group Reuse），并通过循环交换、循环倾斜和循环分块等仿射变换将数据复用转化为数据局部性。
+这一"仿射建模$\to$复用分析$\to$循环变换"的优化范式，为后续的多面体编译理论奠定了重要基础。
+
+在此基础上，多面体模型进一步将迭代空间推广为由仿射不等式定义的整数多面体（Z-Polyhedron），使得内存引用和循环嵌套的边界可以是具有任意形状的多面体。
 这种灵活性使多面体模型在通用编译器中得到广泛应用。
 一些流行的深度学习编译器例如 Tiramisu~\cite{cgo/baghdadi2019tiramisu}，AKG~\cite{pldi/zhao2021akg}，FreeTensor~\cite{pldi/tang2022freetensor} 等都采用了多面体模型。
-基于多面体模型的优势在于可以可以基于多面体 IR 轻松应用各种多面体变换，例如融合、平铺、下沉和映射，包括设备相关和设备无关的优化。
+基于多面体模型的优势在于可以基于多面体 IR 轻松应用各种多面体变换，例如融合、平铺、下沉和映射，包括设备相关和设备无关的优化。
 除此之外也可以复用许多多面体的后端工具链，例如 isl~\cite{verdoolaege2010isl}，Omega~\cite{Blaschek1994}，PIP~\cite{pip}，PolyLib~\cite{loechner1999polylib}。
 然而，尽管基于多面体的编译器非常灵活，但这种灵活也阻碍了与调优机制的集成，同时也很难对硬件信息有强烈的感知。
+此外，Wolf 和 Lam 的原始框架主要针对 CPU 的单层缓存层级进行优化，后续的多面体编译器虽然在理论上支持多层缓存，但在实践中对 GPU 等异构硬件的多层内存层级（全局内存、共享内存、寄存器）缺乏原生的建模能力。
 
 Tiramisu~\cite{cgo/baghdadi2019tiramisu} 是其中比较有代表性的基于多面体模型编译器，系统设计如图 ~\ref{figure:Tiramisu} 所示。
 Tiramisu 设计了四级 IR，分为算法层，通信层，数据格式层和代码转换层。
@@ -98,7 +103,7 @@ Tiramisu 支持多种硬件的代码生成，例如 CUDA，CPU，FPGA 以及分�
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=0.6\textwidth]{figures/triton-kernel-compilation-stages.jpg}
+    \includegraphics[width=0.6\textwidth]{figures/related/triton-kernel-compilation-stages.jpg}
     \caption{Triton Kernel 编译流程~\cite{pldi/tillet2019triton}}
     \label{figure:triton}
 \end{figure}
@@ -125,21 +130,21 @@ Triton 用户可以在 GPU 共享内存上进行编程并制定分块策略，�
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/DeFiNes.png}
+    \includegraphics[width=\textwidth]{figures/related/DeFiNes.png}
     \caption{不同融合技术~\cite{hpca/mei2023defines}}
     \label{figure:DeFiNES}
 \end{figure}
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/FlashAttention.png}
+    \includegraphics[width=\textwidth]{figures/related/FlashAttention.png}
     \caption{FlashAttention-v2 算法流程~\cite{dao2023flashattention}}
     \label{figure:FlashAttention}
 \end{figure}
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/Welder.png}
+    \includegraphics[width=\textwidth]{figures/related/Welder.png}
     \caption{Welder 系统设计~\cite{osdi/shi2023welder}}
     \label{figure:Welder}
 \end{figure}
@@ -161,6 +166,12 @@ Welder 提出了图连接和子图调度两个算法：
 
 然而，基于以上应用在深度学习编译器中的 Tile 技术依然无法表示 FlashAttention，原因在于以上的技术依然局限应用在有向无环图中。
 而 FlashAttention 的算法设计则打破了有向无环图的限制而开启了硬件感知的处理，以有向无环图的信息密度无法将 FlashAttention 等复杂硬件感知算法进行表达。
+
+在分块策略的理论分析方面，Huang 等人在 ISCA 2024 上提出了 Orojenesis~\cite{huang2024orojenesis}，这是一种计算张量算法数据移动界限的系统方法。
+与传统的基于算法最小值（Algorithmic Minimum，即强制缺失）的分析不同，Orojenesis 考虑了片上缓冲区对数据复用的利用能力，能够在给定缓冲区容量约束下计算出任何映射（Mapping）都无法突破的数据移动下界。
+该方法通过"滑雪坡"图（Ski-slope Diagram）直观地展示了缓冲区大小与最小数据移动量之间的关系，为架构设计和分块策略优化提供了重要的理论指导。
+Orojenesis 的分析表明，对于融合操作序列（如 LLM 中的多算子融合），通过利用生产者-消费者之间的 Tile 级数据复用，可以实现显著的数据移动缩减。
+这一理论结果从数据移动的角度进一步验证了基于 Tile 融合策略的优越性，同时也揭示了当前融合技术与理论最优之间仍存在的差距。
 
 \subsection{基于 Tile 抽象的 GPU 编程 DSL 与编译器}
 

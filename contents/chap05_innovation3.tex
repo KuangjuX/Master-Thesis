@@ -1,5 +1,68 @@
 \section{高效的内核映射策略}
 
+\subsection{引言}
+
+前两章分别介绍了 AffineGraph IR 的设计（第三章）和基于分块策略的硬件感知优化方法（第四章）。
+AffineGraph IR 提供了一种层次化的数据流图表示，能够精确描述多内存层级的数据流动模式；分块策略和代价模型则确定了最优的分块配置和执行计划。
+然而，要将这些高层次的优化决策最终转化为可在 GPU 上高效执行的代码，还需要解决一个关键问题：如何将优化后的 AffineGraph IR 系统地映射为具体的硬件指令序列。
+
+这一从抽象表示到可执行代码的转换过程——即\textbf{内核映射}——面临多方面的挑战。
+首先，数据流图中的声明式表示需要转换为命令式的嵌套循环和指令序列，同时保持数据依赖关系的正确性。
+其次，不同内存层级之间的数据移动需要映射到特定的硬件指令（如 \texttt{cp.async}、\texttt{ldmatrix}），并插入适当的同步操作。
+最后，数据在各内存层级中的物理布局需要经过精细的推断和变换，以满足硬件约束（如 Tensor Core 的数据布局要求、共享内存的 Bank Conflict 避免）。
+
+本课题提出了一套完整的内核映射策略，将 AffineGraph IR 的图降低（Graph Lowering）、布局推断与变换、以及基于模板库的代码生成有机结合。
+核心思想是通过对数据流图的拓扑排序遍历，递归地将每个节点转换为对应的硬件操作，同时利用仿射映射信息自动推断最优的数据布局和指令选择。
+
+本课题在本节的组织结构如下：首先介绍代码生成和布局优化所需的预备知识；随后详细阐述图降低与代码生成算法；接着以 GEMM 为案例展示完整的编译流程；然后介绍系统的整体实现架构；最后通过在 NVIDIA A100 和 H800 上的全面实验评估，验证 AffineGraph 在多种深度学习算子上的性能表现。
+
+\subsection{预备知识}
+
+\subsubsection{GPU 执行模型与线程层级}
+
+NVIDIA GPU 采用 SIMT（Single Instruction, Multiple Threads）执行模型，线程被组织为层次化的结构：
+
+\begin{itemize}
+    \item \textbf{线程（Thread）：} 最基本的执行单元，拥有私有的寄存器文件。
+    \item \textbf{线程束（Warp）：} 由 32 个线程组成，是 GPU 调度和执行的基本单位。同一线程束中的线程以锁步（Lockstep）方式执行相同的指令。线程束内的线程可以通过 Warp Shuffle 指令（如 \texttt{\_\_shfl\_xor\_sync}）直接交换寄存器数据，无需经过共享内存。
+    \item \textbf{线程块（Thread Block / CTA）：} 由多个线程束组成，共享同一块共享内存。线程块内的线程通过共享内存和 \texttt{\_\_syncthreads()} 屏障进行通信和同步。
+    \item \textbf{网格（Grid）：} 由多个线程块组成，线程块之间通过全局内存进行通信。
+\end{itemize}
+
+在代码生成过程中，AffineGraph IR 的子图节点层级与 GPU 的线程层级之间存在自然的对应关系：最外层子图对应线程块级并行，内层子图对应线程束级并行，最内层的运算符节点对应具体的硬件指令。
+这种层级对应关系是图降低算法的基础。
+
+\subsubsection{异步数据传输与同步机制}
+
+现代 NVIDIA GPU 提供了多种异步数据传输机制，使得数据移动可以与计算并行执行：
+
+\begin{itemize}
+    \item \textbf{\texttt{cp.async}（Ampere 架构）：} 异步拷贝指令，将数据从全局内存直接拷贝到共享内存，绕过寄存器文件。该指令由专用的异步拷贝引擎执行，不占用计算流水线。通过 \texttt{cp.async.commit\_group} 和 \texttt{cp.async.wait\_group} 指令管理异步操作的提交和等待。
+    \item \textbf{\texttt{ldmatrix}：} 专用的矩阵加载指令，将共享内存中的数据按照 Tensor Core 所需的布局加载到寄存器中。一条 \texttt{ldmatrix} 指令可以一次加载 $16 \times 16$ 的矩阵片段，由一个线程束协作完成。
+    \item \textbf{TMA（Tensor Memory Accelerator，Hopper 架构）：} 张量内存加速器，提供硬件加速的多维数据传输。TMA 通过描述符（Descriptor）定义传输模式，支持自动的地址计算和数据重排，进一步减少了软件开销。
+\end{itemize}
+
+代码生成器需要根据数据移动的源和目标内存层级，自动选择合适的传输指令，并在适当的位置插入同步操作以保证数据一致性。
+AffineGraph IR 中仿射边的内存层级标注为这一自动选择提供了必要的信息。
+
+\subsubsection{数据布局与 Swizzle 变换}
+
+在 GPU 编程中，数据的物理布局对性能有着至关重要的影响。
+共享内存的 Bank Conflict 问题是其中最典型的例子：NVIDIA GPU 的共享内存被划分为 32 个 Bank，每个 Bank 的宽度为 4 字节。
+当同一线程束中的多个线程同时访问同一 Bank 的不同地址时，这些访问会被串行化，导致带宽下降。
+
+Swizzle（交织）变换是解决 Bank Conflict 的标准技术。
+其基本思想是对共享内存中数据的存储地址进行重新映射，使得同一线程束中的线程访问不同的 Bank。
+常见的 Swizzle 模式包括：
+\begin{itemize}
+    \item \textbf{32 字节 Swizzle：} 对地址的低位进行异或（XOR）操作，适用于较小的 Tile 尺寸。
+    \item \textbf{64 字节 Swizzle：} 对更多的地址位进行异或，适用于中等 Tile 尺寸。
+    \item \textbf{128 字节 Swizzle：} 对最多的地址位进行异或，适用于较大的 Tile 尺寸，能够完全消除 Bank Conflict。
+\end{itemize}
+
+Swizzle 模式的选择需要综合考虑 Tile 尺寸、数据类型和访问模式。
+AffineGraph 的布局推断过程能够根据分块配置自动选择最优的 Swizzle 策略，这是本课题布局推断与变换部分的重要内容。
+
 \subsection{图降低与代码生成}
 
 图降低（Graph Lowering）阶段将优化后的 AffineGraph IR 转换为可执行代码。
@@ -48,13 +111,13 @@
 为了更具体地说明 AffineGraph 的工作流程，本节以矩阵乘法（GEMM）为例，展示如何将一个复杂的计算内核通过 AffineGraph 的层级化表示、变换和代码生成流程，最终映射为高性能的 CUDA 代码。
 
 
-\begin{figure*}[h]
+\begin{figure*}%[h]
   \centering
-  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/gemm_case.pdf}
+  \includegraphics[width=0.95\linewidth, trim=0 0 0 0, clip]{figures/innovation3/gemm_case_v5.pdf}
   \caption{使用 AffineGraph 的 GEMM 案例研究。
-  (a) 高层 AffineGraph IR 表示，展示了缓冲区声明和数据移动的仿射映射。
-  (b) 降低后的数据流图，显式地表达了所有依赖关系。
-  (c) 矩阵 A 的分块与到 GPU 执行层级的映射细节，从全局内存、经由共享内存、最终到寄存器。
+  (a) Python DSL 中的 AffineGraph IR，展示了跨越内存层级（全局、共享、寄存器）的缓冲区声明、用于 K 维分块的循环变量，以及定义数据移动模式的仿射映射。
+  (b) 降低后的数据流图，具有显式的依赖关系，且每条数据传输边都标注了仿射变换矩阵。
+  (c) 展示矩阵 A 数据流的 GPU 架构映射：全局内存中的 K 循环迭代 CTA 级分块；共享内存中带有 Swizzle$\langle$2,3,3$\rangle$ 的 4-warp (2$\times$2) 协作；寄存器中分解为 4$\times$2 ldmatrix 分块的 WarpTile (64$\times$32)；以及 Tensor Core MMA 执行流水线。
   }
   \label{figure:gemm_case}
 \end{figure*}
@@ -111,7 +174,7 @@ final_code = top_level_graph.codegen()
 
 \begin{figure*}[h]
   \centering
-  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/layout_transformation.pdf}
+  \includegraphics[width=\linewidth, trim=0 0 0 0, clip]{figures/innovation3/layout_transformation.pdf}
   \caption{AffineGraph 中的布局推断与变换流水线。
   (a) 从全局到共享内存的数据加载，根据 WarpLayout 自动进行向量化和合并内存访问。
   (b) 共享内存布局推断，展示了如何根据 SharedTile 和 WarpLayout 推导 WarpTile 配置，并采用自适应的 Swizzling 策略来平衡 Bank Conflicts 和 CTA 占用率。
@@ -190,6 +253,13 @@ AffineGraph 的实现采用了多语言混合编程的策略，以兼顾开发�
 本课题还评估了 Batched GEMM 操作，这对于经常同时处理多个输入的深度学习负载至关重要。
 最后，本课题评估了编译器在 FlashAttention~\cite{dao2022flashattention}（一种内存高效的注意力机制）上的性能，涵盖了不同的序列长度和隐藏层大小。
 选择这些负载是为了全面评估本课题的编译器在处理内存受限（Memory-bound）和计算受限（Compute-bound）操作方面的能力，以及其在优化复杂算法模式方面的有效性。
+
+\paragraph{性能评估方法论}
+本课题的性能评估遵循数据移动驱动的分析范式。
+Huang 等人~\cite{huang2024orojenesis} 在 ISCA 2024 上提出的 Orojenesis 方法指出，对于张量算法而言，实际可达的数据移动量可能比传统的算法最小值（Algorithmic Minimum）高出数个数量级，尤其是在内存层级的内层。
+这意味着，仅通过峰值 FLOPS 和理论带宽来评估编译器的性能是不充分的——还需要考察编译器在给定片上存储容量下，能够多大程度地逼近数据移动的理论下界。
+因此，本课题在评估中不仅报告了执行时间和吞吐量等传统指标，还通过有效内存带宽（Effective Bandwidth）和带宽利用率（Bandwidth Utilization）等指标来衡量 AffineGraph 在数据移动优化方面的效率。
+特别是对于融合操作（如融合双 GEMM 和 FlashAttention），Orojenesis 的理论分析表明，通过利用生产者-消费者之间的 Tile 级数据复用可以显著缩减数据移动量，这与 AffineGraph 通过仿射分析自动识别跨算子数据复用机会的设计理念高度一致。
 
 \paragraph{基准对比} 本课题将 AffineGraph 与最先进的 DNN 框架和库进行了比较。
 对于标准矩阵乘法（GEMM），本课题与 NVIDIA 针对 CUDA 优化的 BLAS 库 cuBLAS、提供线性代数子程序 CUDA 模板的 CUTLASS~\cite{CUTLASS} 以及用于编写高效 GPU 代码的开源语言和编译器 Triton~\cite{pldi/tillet2019triton} 进行了评估。

@@ -1,10 +1,107 @@
 \section{基于多内存层级数据流图的硬件感知抽象}
 
+\subsection{引言}
+
+随着大语言模型（LLM）的快速发展，以 Transformer~\cite{nips/vaswani2017attention} 为核心的深度学习算法对底层硬件的利用提出了更高的要求。
+FlashAttention~\cite{dao2022flashattention, dao2023flashattention} 等硬件感知算法通过精细控制数据在全局内存、共享内存和寄存器之间的流动，实现了显著的性能提升。
+然而，现有的深度学习编译器中间表示（IR）在表达这类算法时面临根本性的局限：基于 DAG 的 IR（如 TVM~\cite{tvm/chen2018tvm}、XLA~\cite{xla}）将算子视为不透明的节点，无法描述算子内部的嵌套循环结构和多层级内存访问模式；基于多面体模型的 IR（如 Tiramisu~\cite{cgo/baghdadi2019tiramisu}）虽然能够表达循环变换，但缺乏对 GPU 特定硬件单元（如 Tensor Core、线程束）的原生抽象；Triton~\cite{pldi/tillet2019triton} 等硬件感知编译器虽然引入了分块级编程，但其隐式的内存管理限制了对寄存器级数据复用的精细控制。
+
+为了弥合高级算法描述与底层硬件特性之间的语义鸿沟，本课题提出了 AffineGraph IR——一种基于多内存层级数据流图的硬件感知中间表示。
+AffineGraph IR 的设计受到 Wolf 和 Lam~\cite{wolf1991data} 在数据局部性优化领域开创性工作的深刻启发。
+Wolf 和 Lam 首次证明了仿射映射能够精确刻画循环嵌套中的数据复用模式，并通过矩阵分析自动发现最优的循环变换策略。
+本课题将这一核心思想从传统的 CPU 缓存优化扩展到 GPU 的多层内存层级，提出了将数据流图与显式的仿射内存访问模式相结合的设计理念，通过层次化的图结构同时捕获算法的计算逻辑和硬件的内存层级特性。
+具体而言，AffineGraph IR 引入了三种节点类型（缓冲区节点、运算符节点和子图节点）和基于仿射映射的边，能够在单一表示中统一描述数据的存储位置、计算操作和跨内存层级的数据移动模式。
+
+本课题在本节的组织结构如下：首先介绍 AffineGraph IR 所依赖的预备知识，包括 GPU 内存层级结构和仿射变换的数学基础；随后详细阐述 IR 的核心设计，包括各类节点和仿射边的定义；接着讨论控制流与谓词执行机制；最后通过与 CUDA、CuTe、ThunderKittens、Triton 和 TileLang 等主流框架的系统性对比，从代码简洁性、硬件特性覆盖度和多维能力三个方面评估 AffineGraph IR 的表达力。
+
+\subsection{预备知识}
+
+\subsubsection{GPU 内存层级结构}
+
+现代 NVIDIA GPU 采用多层级的内存体系结构，不同层级在容量、带宽和延迟方面存在显著差异。
+以 NVIDIA A100 GPU 为例，其内存层级从低到高包括：
+
+\begin{itemize}
+    \item \textbf{全局内存（Global Memory / HBM）：} 容量为 80GB，带宽约 2.0 TB/s，延迟约 400--600 个时钟周期。全局内存是 GPU 上容量最大但访问延迟最高的存储层级，所有线程均可访问。高效利用全局内存的关键在于实现合并访问（Coalesced Access），即同一线程束（Warp）中的 32 个线程访问连续的内存地址。
+    \item \textbf{共享内存（Shared Memory / SRAM）：} 每个流式多处理器（SM）配备最多 164KB 的共享内存，带宽约 19 TB/s。共享内存由同一线程块（Thread Block）内的所有线程共享，是实现线程间数据复用的关键资源。共享内存被组织为 32 个 Bank，当多个线程同时访问同一 Bank 的不同地址时会产生 Bank Conflict，导致访问串行化。
+    \item \textbf{寄存器文件（Register File）：} 每个 SM 拥有 65536 个 32 位寄存器，是延迟最低、带宽最高的存储层级。寄存器是线程私有的，Tensor Core 的矩阵乘累加（MMA）指令直接操作寄存器中的数据。当寄存器使用量超过硬件限制时，编译器会将数据溢出（Spill）到全局内存，导致严重的性能退化。
+\end{itemize}
+
+高性能 GPU 内核的设计核心在于充分利用这一内存层级结构：将数据从全局内存逐级搬运到共享内存和寄存器，最大化高层级内存中的数据复用，同时最小化低层级内存的访问次数。
+这种多层级的数据流动模式正是 AffineGraph IR 所要建模的核心对象。
+
+\subsubsection{仿射变换与数据局部性优化}
+
+仿射变换是编译器优化领域的核心数学工具，其在循环优化中的系统性应用可以追溯到 Wolf 和 Lam 的开创性工作~\cite{wolf1991data}。
+该工作首次提出了一套完整的基于仿射变换的数据局部性优化框架，通过形式化地分析循环嵌套中的数据复用模式，自动确定最优的循环变换策略以最大化缓存利用率。
+这一理论框架对本课题 AffineGraph IR 的设计产生了深远的影响。
+
+\paragraph{仿射映射的形式化定义}
+一个仿射变换是线性变换与平移的组合。形式上，从 $\mathbb{Z}^m$ 到 $\mathbb{Z}^n$ 的仿射映射 $f$ 定义为：
+\[ f(\vec{x}) = \mathbf{A}\vec{x} + \vec{b} \]
+其中 $\mathbf{A} \in \mathbb{Z}^{n \times m}$ 是线性变换矩阵，$\vec{b} \in \mathbb{Z}^n$ 是平移向量。
+在编译器优化中，仿射映射被广泛用于描述循环嵌套中的内存访问模式。
+例如，对于一个二重循环 \texttt{for i, j: A[2*i+j]}，其访问模式可以表示为仿射映射 $f(i, j) = \begin{bmatrix} 2 & 1 \end{bmatrix} \begin{bmatrix} i \\ j \end{bmatrix}$。
+仿射映射的一个重要性质是其\textbf{可组合性}：两个仿射映射的复合仍然是仿射映射，即 $f \circ g(\vec{x}) = \mathbf{A}_f(\mathbf{A}_g\vec{x} + \vec{b}_g) + \vec{b}_f = (\mathbf{A}_f\mathbf{A}_g)\vec{x} + (\mathbf{A}_f\vec{b}_g + \vec{b}_f)$。
+这一性质使得编译器能够通过矩阵运算高效地分析和变换复杂的嵌套访问模式。
+
+\paragraph{数据复用分析}
+Wolf 和 Lam~\cite{wolf1991data} 的核心贡献之一是提出了基于\textbf{复用向量}（Reuse Vector）和\textbf{复用空间}（Reuse Space）的数据局部性分析框架。
+对于一个深度为 $d$ 的循环嵌套，其迭代空间为 $\mathcal{I} \subseteq \mathbb{Z}^d$，数组引用 $R$ 的访问函数为仿射映射 $F_R: \mathbb{Z}^d \to \mathbb{Z}^n$，即 $F_R(\vec{i}) = \mathbf{H}\vec{i} + \vec{c}$，其中 $\mathbf{H}$ 为访问矩阵。
+该框架定义了三种数据复用类型：
+
+\begin{itemize}
+    \item \textbf{自身时间复用（Self-Temporal Reuse）：} 同一数组引用 $R$ 在不同迭代 $\vec{i}_1$ 和 $\vec{i}_2$ 中访问相同的内存位置，即 $F_R(\vec{i}_1) = F_R(\vec{i}_2)$。复用向量 $\vec{r} = \vec{i}_1 - \vec{i}_2$ 满足 $\mathbf{H}\vec{r} = \vec{0}$，因此自身时间复用空间为 $\ker(\mathbf{H})$——访问矩阵 $\mathbf{H}$ 的零空间。
+    \item \textbf{自身空间复用（Self-Spatial Reuse）：} 同一数组引用在不同迭代中访问同一缓存行（Cache Line）内的不同元素。若缓存行沿数组的第一维对齐，则空间复用空间为 $\ker(\mathbf{H}_s)$，其中 $\mathbf{H}_s$ 是 $\mathbf{H}$ 去掉最后一行后的子矩阵。
+    \item \textbf{组复用（Group Reuse）：} 不同的数组引用 $R_1$ 和 $R_2$ 访问同一数组的相同位置，即 $F_{R_1}(\vec{i}_1) = F_{R_2}(\vec{i}_2)$。当 $\mathbf{H}_1 = \mathbf{H}_2 = \mathbf{H}$ 时，组复用向量满足 $\mathbf{H}\vec{r} = \vec{c}_2 - \vec{c}_1$。
+\end{itemize}
+
+这一分析框架的关键洞察在于：\textbf{数据复用的存在性和方向性完全由访问函数的线性部分（矩阵 $\mathbf{H}$）决定}，而与常数偏移无关。
+这意味着编译器可以通过分析仿射映射的矩阵结构，在不执行程序的情况下静态地确定所有的数据复用机会。
+
+\paragraph{循环变换与分块}
+基于复用分析的结果，Wolf 和 Lam~\cite{wolf1991data} 进一步提出了通过仿射循环变换来优化数据局部性的系统方法。
+一个循环变换可以表示为迭代空间上的仿射映射 $T: \mathbb{Z}^d \to \mathbb{Z}^d$，即 $\vec{i}' = \mathbf{T}\vec{i}$，其中 $\mathbf{T}$ 为非奇异整数矩阵。
+常见的循环变换包括：
+
+\begin{itemize}
+    \item \textbf{循环交换（Loop Interchange）：} 通过置换矩阵 $\mathbf{T}$ 交换循环的嵌套顺序，使得具有复用的循环维度位于最内层，从而将复用转化为局部性。
+    \item \textbf{循环倾斜（Loop Skewing）：} 通过上三角矩阵 $\mathbf{T}$ 对迭代空间进行倾斜变换，使得原本存在依赖的循环维度变得可并行或可分块。
+    \item \textbf{循环分块（Loop Tiling）：} 将循环的迭代空间划分为固定大小的块（Tile），使得每个块内的数据能够完全放入缓存中。分块是将复用转化为局部性的最直接手段。
+\end{itemize}
+
+Wolf 和 Lam 的算法通过以下步骤实现自动优化：首先，对每个数组引用计算复用空间；然后，选择循环变换使得尽可能多的复用向量指向最内层循环方向；最后，对最内层的若干循环维度应用分块变换，使得块大小匹配缓存容量。
+这一"分析复用 $\to$ 变换循环 $\to$ 应用分块"的优化范式，为后续的多面体编译模型奠定了理论基础。
+
+\paragraph{迭代域与多面体模型}
+在多面体编译模型中，仿射映射与\textbf{迭代域}（Iteration Domain）结合使用。
+迭代域 $\mathcal{D} \subseteq \mathbb{Z}^m$ 通常是一个由仿射不等式定义的整数多面体（Z-Polyhedron），即 $\mathcal{D} = \{\vec{x} \in \mathbb{Z}^m \mid \mathbf{D}\vec{x} + \vec{d} \ge \vec{0}\}$。
+Wolf 和 Lam 的工作可以视为多面体模型的重要先驱：他们将循环嵌套的迭代空间、数组访问函数和数据依赖关系统一纳入仿射框架进行分析，这一思想后来被 Feautrier~\cite{feautrier1992some}、Bondhugula~\cite{bondhugula2008practical} 等人进一步发展为完整的多面体编译理论。
+
+\paragraph{对本课题的启发}
+Wolf 和 Lam 的数据局部性优化理论对本课题的 AffineGraph IR 设计产生了直接的启发。
+本课题继承了其核心思想——\textbf{通过仿射映射形式化地描述数据访问模式，并基于矩阵分析自动发现数据复用机会}——但在以下方面进行了关键性的扩展：
+\begin{itemize}
+    \item \textbf{从单层缓存到多层内存层级：} Wolf 和 Lam 的原始框架主要针对 CPU 的单层缓存进行优化。本课题将仿射分析扩展到 GPU 的三层内存层级（全局内存$\to$共享内存$\to$寄存器），每一层的数据移动都由独立的仿射边描述，使得编译器能够同时优化多个层级的数据局部性。
+    \item \textbf{从循环嵌套到数据流图：} 原始框架在循环嵌套的语法结构上进行分析。本课题将仿射映射嵌入到数据流图的边中，使得复用分析不再局限于单个循环嵌套，而是能够跨越多个计算阶段（如融合 GEMM 中的两个矩阵乘法）进行全局优化。
+    \item \textbf{从通用缓存到硬件特定约束：} 原始框架假设均匀的缓存行为。本课题在仿射映射中编码了 GPU 特有的硬件约束，如共享内存的 Bank Conflict 模式、Tensor Core 的数据布局要求和异步数据传输的对齐约束，使得优化结果能够直接映射到高效的硬件指令。
+\end{itemize}
+
+\subsubsection{Tensor Core 与矩阵乘累加指令}
+
+NVIDIA GPU 从 Volta 架构开始引入了 Tensor Core，这是一种专用的矩阵计算单元，能够在单个时钟周期内完成小规模矩阵的乘累加（Matrix Multiply-Accumulate, MMA）操作。
+以 A100 GPU 为例，其 Tensor Core 支持 $16 \times 8 \times 16$（FP16）的 MMA 指令，即在一个操作中完成 $D = A \times B + C$ 的计算，其中 $A$ 为 $16 \times 16$、$B$ 为 $16 \times 8$、$C$ 和 $D$ 为 $16 \times 8$ 的矩阵。
+
+Tensor Core 的高效利用要求数据以特定的布局存储在寄存器中。
+具体而言，一个线程束（32 个线程）协作持有 MMA 操作所需的矩阵片段，每个线程持有矩阵的若干元素。
+数据通过 \texttt{ldmatrix} 指令从共享内存加载到寄存器中，该指令要求共享内存中的数据按照特定的 Swizzle 模式排列以避免 Bank Conflict。
+AffineGraph IR 中的运算符节点和仿射边能够精确建模这些硬件约束，为自动化的 Tensor Core 代码生成提供了基础。
+
 \subsection{基于数据流的 Affine IR 设计}
 
 \begin{figure}%[h]
     \centering
-    \includegraphics[width=\textwidth]{figures/affinegraph-abstraction.pdf}
+    \includegraphics[width=\textwidth]{figures/innovation1/affinegraph-abstraction.pdf}
     \caption{AffineGraph IR 的核心抽象：(a) \textbf{AffineEdge} 通过基于仿射映射的访问模式连接节点；(b) \textbf{AffineNode} 为缓冲区、任务和嵌套 AffineGraph 提供统一抽象；(c) \textbf{AffineGraph} 将节点和边组合成层次化数据流图。}
     \label{figure:affinegraph-abstraction}
 \end{figure}
@@ -19,7 +116,7 @@ AffineGraph IR 的核心在于引入了一种层次化表示，它将数据流�
 
 \begin{figure*}[h]
     \centering
-    \includegraphics[width=0.95\textwidth]{figures/affine_flash_attention.pdf}
+    \includegraphics[width=0.95\textwidth]{figures/innovation1/affine_flash_attention.pdf}
     \caption{AffineGraph IR 中 FlashAttention-2 的数据流表示。该图展示了嵌套的 SuperGraph 节点捕获了块级和线程束级的层次化分块。缓冲区节点明确标注了内存空间：全局内存（蓝色）用于 HBM 中的 Q、K、V、O；共享内存（绿色）用于 SRAM 中的分块数据；寄存器（黄色）用于计算片段。运算符节点（红色）表示 Tensor Core MMA 操作和在线 Softmax。仿射边通过仿射映射变换编码数据移动。融合计算区域展示了 MMA 和 Softmax 操作在没有中间内存写入的情况下执行，数据依赖在最终 MMA 操作之前的合并点处汇聚。}
     \label{figure:affinegraph-flashattention}
 \end{figure*}
@@ -101,24 +198,45 @@ AffineGraph 通过谓词执行（Predication）来解决这个问题，即操作
 \subsection{AffineGraph IR 表达力评估}
 
 为了量化 AffineGraph IR 相比现有框架的优势，本课题从代码复杂度、硬件特性覆盖度和多维能力三个方面进行了系统性评估。
-对比对象包括 CUDA、CuTe（CUTLASS）、ThunderKittens、Triton、PyTorch 和 TileLang 等主流 GPU 编程框架。
+对比对象包括 CUDA（CUTLASS）、CuTe、ThunderKittens、Triton 和 TileLang 等主流 GPU 编程框架。
+所有代码行数数据均来自各框架的公开 GitHub 仓库\footnote{
+\begin{tabular}{@{}ll@{}}
+\textbf{AffineGraph:} & \url{https://github.com/TiledTensor/TiledLower} \\
+\textbf{CUTLASS:}    & \url{https://github.com/NVIDIA/cutlass} \\
+\textbf{ThunderKittens:} & \url{https://github.com/HazyResearch/ThunderKittens} \\
+\textbf{Triton:}     & \url{https://github.com/triton-lang/triton} \\
+\textbf{TileLang:}   & \url{https://github.com/microsoft/TileLang} 
+\end{tabular}
+}
+}的真实源码测量，统计时排除注释和空行，仅计算核心实现逻辑。
 
 \subsubsection{代码简洁性分析}
 
 \begin{figure}[h]
     \centering
     \includegraphics[width=\textwidth]{figures/evaluations/ir_eval_loc_comparison.pdf}
-    \caption{不同框架实现相同算法所需的代码行数（LoC）对比。纵轴采用对数坐标。AffineGraph IR 在所有算法上均实现了最少的代码量，相比 CUDA 减少了 93\%--95\% 的代码行数。}
+    \caption{不同框架实现相同算法所需的代码行数（LoC）对比。纵轴采用对数坐标。数据来源于各框架公开仓库的真实源码测量。}
     \label{figure:ir_eval_loc}
 \end{figure}
 
-图~\ref{figure:ir_eval_loc} 展示了使用不同框架实现五种典型深度学习算法所需的代码行数（Lines of Code, LoC）。
-本课题统计的代码行数不包括注释和空行，仅计算核心实现逻辑。
-评估的算法包括：标准矩阵乘法（GEMM）、FlashAttention-2、融合 Softmax（Fused Softmax）、LayerNorm 和融合双 GEMM（Fused GEMM）。
+图~\ref{figure:ir_eval_loc} 展示了使用不同框架实现三种典型深度学习算法所需的代码行数（Lines of Code, LoC）。
+评估的算法包括：标准矩阵乘法（GEMM）、FlashAttention-2 前向传播和融合双 GEMM（Fused GEMM / B2B GEMM）。
 
-结果表明，AffineGraph IR 在所有算法上均实现了最少的代码量。
-以 FlashAttention-2 为例，CUDA 实现需要约 1500 行代码，CuTe 需要约 780 行，ThunderKittens 需要约 200 行，Triton 需要约 150 行，TileLang 需要约 105 行，而 AffineGraph IR 仅需约 52 行，相比 CUDA 减少了约 96.5\% 的代码。
-这种显著的代码缩减源于 AffineGraph IR 的层次化抽象设计：缓冲区节点自动管理内存层级，仿射边隐式编码数据移动模式，子图节点封装了分块和并行策略，使得开发者只需关注算法的核心计算逻辑。
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/evaluations/ir_eval_gemm_detail.pdf}
+    \caption{GEMM 内核实现复杂度的详细对比。括号内标注了各框架的具体源文件。AffineGraph 使用层次化数据流图描述三层内存层级的 GEMM。}
+    \label{figure:ir_eval_gemm_detail}
+\end{figure}
+
+以 GEMM 为例（图~\ref{figure:ir_eval_gemm_detail}），CUDA（CUTLASS \texttt{basic\_gemm.cu}）需要 255 行代码，CuTe（\texttt{sgemm\_sm80.cu}）需要约 300 行，ThunderKittens（\texttt{bf16\_h100\_gemm.cu}）需要 173 行，Triton（\texttt{03-matrix-multiplication.py}）的 kernel 函数仅需 35 行，TileLang（\texttt{example\_gemm.py}）需要 34 行，而 AffineGraph IR（\texttt{whole\_gemm.py}）需要 86 行。
+值得注意的是，AffineGraph IR 的 86 行代码完整描述了从全局内存到共享内存再到寄存器的三层内存层级数据流，包括所有的仿射映射和数据移动模式。
+虽然 Triton 和 TileLang 的 kernel 代码行数更少（分别为 35 和 34 行），但它们隐藏了内存层级管理的细节——Triton 将内存管理完全交给编译器自动处理，TileLang 通过 schedule 原语隐式管理。
+AffineGraph IR 在保持显式内存层级控制的同时，仍然实现了比 CUDA 减少约 66\% 的代码量。
+
+对于更复杂的 FlashAttention-2 算法，代码量差异更加显著。
+CUDA（Flash Attention 仓库的 \texttt{flash\_fwd\_kernel.h} 及相关头文件）需要约 1674 行核心 kernel 代码，CuTe/CUTLASS（\texttt{88\_hopper\_fmha} 示例）的完整实现达到 4388 行，ThunderKittens 需要 881 行，Triton 的 kernel 函数需要 319 行，TileLang 需要 191 行。
+AffineGraph IR（\texttt{flash\_attention\_fwd.py}）仅需 170 行即可完整描述 FlashAttention-2 前向传播的三层内存层级数据流，包括 Q@K\textsuperscript{T} 和 P@V 两个 GEMM 操作、类型转换以及所有的仿射映射和数据移动模式，相比 CUDA 减少约 90\% 的代码。
 
 \begin{figure}[h]
     \centering
@@ -143,44 +261,39 @@ AffineGraph 通过谓词执行（Predication）来解决这个问题，即操作
 \end{figure}
 
 图~\ref{figure:ir_eval_features} 展示了各框架对 9 项关键硬件特性的支持程度。
-这些特性涵盖了现代 GPU 编程中的核心需求：显式内存层级管理、Bank Conflict 建模、层次化分块、仿射变换分析、自动优化、谓词执行、Tensor Core 映射、流水线调度和多架构可移植性。
-
-AffineGraph IR 是唯一在所有 9 项特性上均实现完全自动支持的框架。
-具体而言：
-\begin{itemize}
-    \item \textbf{仿射变换分析}是 AffineGraph IR 的独特优势。CUDA 完全不支持此特性，CuTe 和 TileLang 仅提供部分支持，而 AffineGraph IR 通过其核心的仿射映射抽象实现了完全自动化的变换分析。
-    \item \textbf{多架构可移植性}方面，CUDA 和 ThunderKittens 不具备跨架构能力，CuTe 和 TileLang 仅提供有限支持，而 AffineGraph IR 通过将硬件特性参数化到节点和边的属性中，实现了对不同 GPU 架构的统一抽象。
-    \item \textbf{Bank Conflict 建模}方面，Triton 和 PyTorch 完全不支持此特性，ThunderKittens 仅提供部分支持，而 AffineGraph IR 通过仿射映射的组合分析自动检测和消除 Bank Conflicts。
-\end{itemize}
-
-\subsubsection{性能与复杂度的权衡}
+这些特性涵盖了现代 GPU 编程中的核心需求：显式内存层级管理、Bank Conflict 建模、层次化分块、仿射访问模式分析、自动流水线调度、谓词执行、Tensor Core 映射、多层级数据流图和多架构可移植性。
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=0.85\textwidth]{figures/evaluations/ir_eval_pareto.pdf}
-    \caption{FlashAttention-2 的性能（相对于 cuBLAS 的百分比）与代码复杂度（LoC）的 Pareto 图。气泡大小表示表达力得分。AffineGraph IR 位于 Pareto 最优前沿的左上角，以最少的代码实现了最高的性能。}
-    \label{figure:ir_eval_pareto}
+    \includegraphics[width=0.85\textwidth]{figures/evaluations/ir_eval_feature_score.pdf}
+    \caption{各框架的硬件特性支持总分（满分 18 分）。AffineGraph IR 以 18/18 的满分成为唯一在所有特性上均实现完全自动支持的框架。}
+    \label{figure:ir_eval_feature_score}
 \end{figure}
 
-图~\ref{figure:ir_eval_pareto} 展示了以 FlashAttention-2 为代表负载的性能与代码复杂度权衡分析。
-横轴为代码行数（对数坐标），纵轴为相对于 cuBLAS 的性能百分比，气泡大小编码了各框架的表达力得分（基于图~\ref{figure:ir_eval_features} 中特性支持矩阵的列求和）。
+图~\ref{figure:ir_eval_feature_score} 汇总了各框架的特性支持总分。AffineGraph IR 以 18/18 的满分位居首位，是唯一在所有 9 项特性上均实现完全自动支持的框架。
+TileLang 以 15/18 位居第二，CuTe 以 12/18 位居第三。
+具体而言：
+\begin{itemize}
+    \item \textbf{仿射访问模式分析}是 AffineGraph IR 的独特优势。CUDA 和 Triton 完全不支持此特性，CuTe 和 TileLang 仅提供部分支持，而 AffineGraph IR 通过其核心的仿射映射抽象实现了完全自动化的访问模式分析。
+    \item \textbf{多层级数据流图}是 AffineGraph IR 的另一核心创新。其他框架均不提供或仅部分提供层次化的数据流图抽象，而 AffineGraph IR 通过子图节点的递归嵌套，天然支持多层级的数据流表示。
+    \item \textbf{多架构可移植性}方面，CUDA 和 ThunderKittens 不具备跨架构能力，CuTe 和 TileLang 仅提供有限支持，而 AffineGraph IR 通过将硬件特性参数化到节点和边的属性中，实现了对不同 GPU 架构的统一抽象。
+\end{itemize}
 
-AffineGraph IR 位于 Pareto 最优前沿的左上角，以仅 52 行代码实现了 cuBLAS 108\% 的性能。
-这意味着 AffineGraph IR 不仅代码最简洁，性能也最优。
-相比之下，CUDA 虽然性能接近（98\%），但需要 1500 行代码；CuTe 性能略高（103\%），但代码量是 AffineGraph IR 的 15 倍。
-Triton 虽然代码量较少（150 行），但性能仅为 cuBLAS 的 92\%。
+\subsubsection{多维能力综合评估}
 
 \begin{figure}[h]
     \centering
     \includegraphics[width=0.75\textwidth]{figures/evaluations/ir_eval_radar.pdf}
-    \caption{五种框架在 7 个维度上的多维能力对比雷达图。AffineGraph IR 在所有维度上均达到了最高或接近最高的评分。}
+    \caption{五种框架在 7 个维度上的多维能力对比雷达图。AffineGraph IR 在内存抽象、表达力和认知简单性维度上显著优于其他框架。}
     \label{figure:ir_eval_radar}
 \end{figure}
 
 图~\ref{figure:ir_eval_radar} 通过雷达图从 7 个维度综合对比了各框架的能力。
 这 7 个维度包括：代码简洁性、认知简单性、内存抽象、表达力、自动优化、编译效率和硬件可移植性。
-AffineGraph IR 在所有维度上均达到了最高或接近最高的评分，形成了最大的覆盖面积。
-特别是在内存抽象（10/10）、代码简洁性（9/10）和认知简单性（9/10）三个维度上，AffineGraph IR 显著优于其他框架。
+AffineGraph IR 在大多数维度上均达到了最高或接近最高的评分，形成了最大的覆盖面积。
+特别是在内存抽象（10/10）、表达力（9/10）和认知简单性（9/10）三个维度上，AffineGraph IR 显著优于其他框架。
+在代码简洁性维度上，Triton 和 TileLang 由于隐藏了内存管理细节而获得了较高的评分（8/10），AffineGraph IR 以 7/10 紧随其后——这反映了 AffineGraph IR 在保持显式内存层级控制的同时仍然维持了较高的代码简洁性。
 这得益于其层次化的数据流图设计和仿射映射的统一抽象，使得复杂的硬件优化能够以直观、简洁的方式表达。
 
-综合以上评估结果，AffineGraph IR 在代码简洁性、硬件特性覆盖度和性能三个方面均展现出显著优势，验证了其作为新一代 GPU 编程抽象的有效性。
+综合以上评估结果，AffineGraph IR 在硬件特性覆盖度和表达力方面展现出显著优势。
+虽然在纯代码行数上，隐藏内存管理细节的 Triton 和 TileLang 可以实现更少的代码量，但 AffineGraph IR 在保持显式硬件控制的前提下，仍然大幅减少了代码复杂度，并且是唯一在所有硬件特性上均实现完全自动支持的框架，验证了其作为新一代 GPU 编程抽象的有效性。
