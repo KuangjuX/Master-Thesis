@@ -237,10 +237,14 @@ __global__ void gemm(const InType* dA, const InType* dB, AccType* dC) {
 
 \subsection{系统实现}
 
-AffineGraph 的实现采用了多语言混合编程的策略，以兼顾开发效率与运行性能。
-其中，用户编程接口和解析器部分由 Python 实现，提供了友好的 API。
-图表示的核心组件，包括图的构建、分析与优化变换，则由 Rust 实现，利用其高性能和内存安全的特性来处理复杂的图算法。
-最终的硬件代码生成部分由 C++ 实现，针对 NVIDIA GPU 生成了高度优化的 CUDA 代码，能够高效利用 Tensor Core 等硬件单元。
+AffineGraph 的实现采用了 Python、Rust 和 C++ 混合编程。编程接口和解析器由约 700 行 Python 代码实现，提供了友好的 API 用于定义计算图和应用优化。
+
+图表示和优化组件包含约 4,000 行 Rust 代码，用于分析和变换 AffineGraph IR。该组件处理图遍历、依赖分析以及将高级 IR 转换为特定硬件表示的图降级算法。Rust 核心利用 Rust 的所有权模型在保持高性能的同时确保内存安全。
+
+最后，特定硬件的代码生成组件由约 15,000 行 C++ 代码实现（TileFusion）。该组件为 NVIDIA GPU 生成高度优化的 CUDA 代码，高效利用 Tensor Core 进行矩阵乘法运算，并优化跨不同存储层次的数据移动。C++ 后端是一组专用的代码生成器，支持 AffineGraph IR 在 NVIDIA Ampere GPU 上的高效执行。
+
+\paragraph{Hopper 架构原型。}
+为了验证 AffineGraph 设计原则在 Ampere 架构之外的可移植性，我们针对内存受限操作实现了一个面向 NVIDIA Hopper (H800) 的原型。该原型遵循 AffineGraph 的核心方法论——具有显式存储层次映射的分层切片——并使用 NVIDIA 的 CuTe DSL~\cite{CUTLASS} 实现，该 DSL 为 Hopper 特有的功能（如 TMA 和线程块集群）提供了 Python 级别的抽象。特别是，该原型采用了 \S\ref{sec:hopper-extension} 中描述的相同的基于切片的数据流设计：数据移动被组织为一个分层的 Global$\rightarrow$Shared$\rightarrow$Register 流水线，并针对大切片尺寸采用集群级协作加载。该原型表明，AffineGraph 的设计可以自然地扩展到 Hopper 增强的存储子系统，只需要在后端指令选择层面进行更改，而保留相同的 IR 级抽象。将 Hopper 代码生成后端完全集成到编译器中是一项工程工作，不需要对 IR 或优化流水线进行根本性的更改。
 
 \subsection{实验评估}
 
